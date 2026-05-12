@@ -1,8 +1,8 @@
 #include "ESP8266.h"
 #include "ESP8266Config.h"
-
-Wifi_t Wifi;
 //#########################################################################################################
+Wifi_t Wifi;
+
 bool Wifi_SendRaw(uint8_t *data,uint16_t len)
 {
 	if(len <= _WIFI_TX_SIZE)
@@ -142,7 +142,7 @@ bool Wifi_ReturnStrings(char *InputString,char *SplitterChars,uint8_t CountOfPar
 //#########################################################################################################
 bool Wifi_ReturnInteger(int32_t	*result,uint8_t WantWhichOne,char *SplitterChars)
 {
-	if(result == NULL)
+	if((char*)Wifi.RxBuffer == NULL)
 		return false;
 	if(Wifi_ReturnString((char*)Wifi.RxBuffer,WantWhichOne,SplitterChars)==false)
 		return false;
@@ -153,7 +153,7 @@ bool Wifi_ReturnInteger(int32_t	*result,uint8_t WantWhichOne,char *SplitterChars
 
 bool Wifi_ReturnFloat(float	*result,uint8_t WantWhichOne,char *SplitterChars)
 {
-	if(result == NULL)
+	if((char*)Wifi.RxBuffer == NULL)
 		return false;
 	if(Wifi_ReturnString((char*)Wifi.RxBuffer,WantWhichOne,SplitterChars)==false)
 		return false;
@@ -187,11 +187,9 @@ void Wifi_TxClear(void)
 //#########################################################################################################
 void Wifi_RxCallBack(void)
 {
-	if (Wifi.RxIndex < (_WIFI_RX_SIZE - 1))
-	{
-		Wifi.RxBuffer[Wifi.RxIndex++] = Wifi.usartBuff;
-		Wifi.RxBuffer[Wifi.RxIndex] = 0;
-	}
+	Wifi.RxBuffer[Wifi.RxIndex] = Wifi.usartBuff;
+	if(Wifi.RxIndex < _WIFI_RX_SIZE)
+	  Wifi.RxIndex++;
 	HAL_UART_Receive_IT(&_WIFI_USART,&Wifi.usartBuff,1);
 }
 //#########################################################################################################
@@ -871,7 +869,8 @@ bool  Wifi_TcpIp_SetEnableTcpServer(uint16_t PortNumber)
 			Wifi.TcpIpMultiConnection=true;
 			Wifi_RxClear();
 		}
-		sprintf((char*)Wifi.TxBuffer,"AT+CIPSERVER=1,%d\r\n",PortNumber);
+		else
+		  sprintf((char*)Wifi.TxBuffer,"AT+CIPSERVER=1,%d\r\n",PortNumber);
 		if(Wifi_SendString((char*)Wifi.TxBuffer)==false)
 			break;
 		if(Wifi_WaitForString(_WIFI_WAIT_TIME_LOW,&result,2,"OK","ERROR")==false)
@@ -940,10 +939,12 @@ bool  Wifi_TcpIp_SendDataTcp(uint8_t LinkId,uint16_t dataLen,uint8_t *data)
 	{
 		Wifi_RxClear();
 		if(Wifi.TcpIpMultiConnection==false)
-			sprintf((char*)Wifi.TxBuffer,"AT+CIPSEND=%d\r\n",dataLen);
+			sprintf((char*)Wifi.TxBuffer,"AT+CIPSENDBUF=%d\r\n",dataLen);
 		else
-			sprintf((char*)Wifi.TxBuffer,"AT+CIPSEND=%d,%d\r\n",LinkId,dataLen);
+			sprintf((char*)Wifi.TxBuffer,"AT+CIPSENDBUF=%d,%d\r\n",LinkId,dataLen);
 		if(Wifi_SendString((char*)Wifi.TxBuffer)==false)
+			break;
+		if(Wifi_WaitForString(_WIFI_WAIT_TIME_LOW,&result,2,"OK","ERROR")==false)
 			break;
 		if(Wifi_WaitForString(_WIFI_WAIT_TIME_LOW,&result,3,">","ERROR","busy")==false)
 			break;
@@ -951,9 +952,7 @@ bool  Wifi_TcpIp_SendDataTcp(uint8_t LinkId,uint16_t dataLen,uint8_t *data)
 			break;
 		Wifi_RxClear();
 		Wifi_SendRaw(data,dataLen);
-		if(Wifi_WaitForString(_WIFI_WAIT_TIME_LOW,&result,3,"SEND OK","OK","ERROR")==false)
-			break;
-		if(result == 3)
+		if(Wifi_WaitForString(_WIFI_WAIT_TIME_LOW,&result,2,"OK","ERROR")==false)
 			break;
 		returnVal=true;
 	}while(0);

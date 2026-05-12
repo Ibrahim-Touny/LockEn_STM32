@@ -2,13 +2,15 @@
 #define	_ESP8266_H
 
 #include "ESP8266Config.h"
-#include <stdbool.h>
 #include <stdlib.h>
 #include <stdio.h>
 #include <string.h>
 #include <stdarg.h>
 #include "stm32f4xx_hal.h"
 #include "dwt_stm32_delay.h"
+
+
+typedef enum{false = 0, true = 1}bool;
 
 extern UART_HandleTypeDef 	_WIFI_USART;
 
@@ -78,7 +80,6 @@ typedef struct
 extern Wifi_t	Wifi;
 //###################################################################################################
 void Wifi_RxClear(void);
-bool Wifi_SendRaw(uint8_t *data,uint16_t len);
 bool Wifi_SendString(char *data);
 bool Wifi_WaitForString(uint32_t TimeOut_ms,uint8_t *result,uint8_t CountOfParameter,...);
 void Wifi_RxCallBack(void);
@@ -125,4 +126,3 @@ bool Wifi_TcpIp_SendDataUdp(uint8_t LinkId,uint16_t dataLen,uint8_t *data);
 bool Wifi_TcpIp_SendDataTcp(uint8_t LinkId,uint16_t dataLen,uint8_t *data);
 
 #endif
-
