@@ -1,4 +1,7 @@
+"./Core/Src/ESP8266.o"
 "./Core/Src/R307.o"
+"./Core/Src/dwt_stm32_delay.o"
+"./Core/Src/esp8266_portal.o"
 "./Core/Src/i2c-lcd.o"
 "./Core/Src/lcd_log.o"
 "./Core/Src/main.o"
