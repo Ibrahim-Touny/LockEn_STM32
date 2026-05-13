@@ -5,15 +5,12 @@ Wifi_t Wifi;
 
 bool Wifi_SendRaw(uint8_t *data,uint16_t len)
 {
-	if(len <= _WIFI_TX_SIZE)
-	{
-		// Send the information in data through the UART of the ESP8266
-		memcpy(Wifi.TxBuffer,data,len);
-		if(HAL_UART_Transmit(&_WIFI_USART,data,len,900) == HAL_OK)
-			return true;
-		else
-			return false;
-	}
+	if(len == 0 || len > _MAX_SEND_BYTES)
+		return false;
+
+	// Send the information in data through the UART of the ESP8266
+	if(HAL_UART_Transmit(&_WIFI_USART,data,len,900) == HAL_OK)
+		return true;
 	else
 		return false;
 }

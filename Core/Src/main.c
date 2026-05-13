@@ -21,6 +21,7 @@
 #include "rc522.h"
 #include "R307.h"
 #include "mpu6050.h"
+#include "ESP8266.h"
 
 /* ── MPU6050 motion / tamper detection tuning ───────────────────────────── */
 /* For AFS=8G (4096 LSB/g) and FS=1000 dps (32.8 LSB/dps).
@@ -65,6 +66,15 @@ uint8_t sNum[5];          /* scanned card UID */
 uint8_t AUTH_CARD[5]                      = {0};
 char    SAVED_PASSWORD[PASSWORD_LEN + 1]  = {0};
 
+/* ── WiFi web mirror configuration ─────────────────────────────────────── */
+#define WIFI_AP_SSID         "LockEn-LCD"
+#define WIFI_AP_PASSWORD     "LockEn123"
+#define WIFI_AP_CHANNEL      1U
+#define WIFI_WEB_PORT        80U
+
+static char lcd_rows[2][17] = {{'\0'}, {'\0'}};
+static bool wifi_web_started = false;
+
 /* ── Private prototypes ─────────────────────────────────────────────────── */
 void SystemClock_Config(void);
 static void MX_GPIO_Init(void);
@@ -72,12 +82,139 @@ static void MX_I2C1_Init(void);
 static void MX_I2C2_Init(void);
 static void MX_SPI1_Init(void);
 static void MX_USART1_UART_Init(void);
+static void MX_USART2_UART_Init(void);
 static void MX_USART6_UART_Init(void);
 
 /* ── Small helper: |int16| → uint16 ─────────────────────────────────────── */
 static uint16_t u16_abs_i16(int16_t v)
 {
     return (v < 0) ? (uint16_t)(-v) : (uint16_t)v;
+}
+
+static void lcd_cache_row(uint8_t row, const char *s)
+{
+    if (row > 1)
+        return;
+
+    memset(lcd_rows[row], ' ', 16);
+    lcd_rows[row][16] = '\0';
+
+    if (s == NULL)
+        return;
+
+    size_t len = strlen(s);
+    if (len > 16)
+        len = 16;
+    memcpy(lcd_rows[row], s, len);
+}
+
+static void lcd_clear_tracked(void)
+{
+    lcd_cache_row(0, "");
+    lcd_cache_row(1, "");
+    lcd_clear();
+}
+
+#define lcd_clear lcd_clear_tracked
+
+static void Wifi_Web_SendPage(uint8_t linkId)
+{
+    char page[_MAX_SEND_BYTES];
+    int written = snprintf(
+        page,
+        sizeof(page),
+        "HTTP/1.1 200 OK\r\n"
+        "Content-Type: text/html; charset=utf-8\r\n"
+        "Cache-Control: no-store\r\n"
+        "Connection: close\r\n\r\n"
+        "<!doctype html><html><head><meta charset='utf-8'>"
+        "<meta http-equiv='refresh' content='1'>"
+        "<meta name='viewport' content='width=device-width, initial-scale=1'>"
+        "<title>LockEn LCD</title>"
+        "<style>body{font-family:monospace;background:#0f172a;color:#e2e8f0;margin:0;padding:20px}"
+        ".panel{max-width:680px;margin:0 auto;background:#111827;border:1px solid #334155;border-radius:16px;padding:20px}"
+        ".row{display:flex;justify-content:space-between;gap:12px;padding:10px 12px;margin:10px 0;background:#1f2937;border-radius:10px;white-space:pre}"
+        ".label{color:#94a3b8}.lcd{font-size:18px;line-height:1.5}</style></head><body>"
+        "<div class='panel'><h1>LockEn LCD Mirror</h1><p>SSID: %s</p><p>Connect to the AP, then keep this page open.</p>"
+        "<div class='lcd'><div class='row'><span class='label'>Row 1</span><span>%s</span></div>"
+        "<div class='row'><span class='label'>Row 2</span><span>%s</span></div></div></div></body></html>",
+        WIFI_AP_SSID,
+        lcd_rows[0],
+        lcd_rows[1]);
+
+    if (written > 0)
+    {
+        if ((size_t)written >= sizeof(page))
+            written = (int)(sizeof(page) - 1);
+        Wifi_TcpIp_SendDataTcp(linkId, (uint16_t)written, (uint8_t *)page);
+    }
+
+    Wifi_TcpIp_Close(linkId);
+}
+
+static void Wifi_Web_Poll(void)
+{
+    if (!wifi_web_started)
+        return;
+
+    if (Wifi.RxIndex == 0)
+        return;
+
+    char *ipd = strstr((char *)Wifi.RxBuffer, "+IPD,");
+    if (ipd == NULL)
+        return;
+
+    uint8_t linkId = 0;
+    char *cursor = ipd + 5;
+    if (Wifi.TcpIpMultiConnection)
+    {
+        linkId = (uint8_t)strtoul(cursor, &cursor, 10);
+        if (*cursor != ',')
+            return;
+        cursor++;
+    }
+
+    (void)strtoul(cursor, &cursor, 10);
+    cursor = strchr(cursor, ':');
+    if (cursor == NULL)
+        return;
+    cursor++;
+
+    if (strncmp(cursor, "GET ", 4) != 0)
+        return;
+
+    Wifi_Web_SendPage(linkId);
+    Wifi_RxClear();
+}
+
+static bool Wifi_Web_Start(void)
+{
+    wifi_web_started = false;
+    Wifi_RxClear();
+
+    if (Wifi_Init() == false)
+        return false;
+
+    if (Wifi_SetMode(WifiMode_SoftAp) == false)
+        return false;
+
+    if (Wifi_SoftAp_Create((char *)WIFI_AP_SSID,
+                           (char *)WIFI_AP_PASSWORD,
+                           WIFI_AP_CHANNEL,
+                           WifiEncryptionType_WPA2_PSK,
+                           1,
+                           false) == false)
+        return false;
+
+    if (Wifi_TcpIp_SetMultiConnection(true) == false)
+        return false;
+
+    if (Wifi_TcpIp_SetEnableTcpServer(WIFI_WEB_PORT) == false)
+        return false;
+
+    wifi_web_started = true;
+    Wifi_RxClear();
+    return true;
 }
 
 /* ─────────────────────────────────────────────────────────────────────────
@@ -148,8 +285,12 @@ void lcd_send_string_safe(const char *s)
     memset(buf, ' ', 16);
     buf[16] = '\0';
 
-    uint8_t len = (uint8_t)strlen(s);
-    if (len > 16) len = 16;
+    if (s == NULL)
+        s = "";
+
+    size_t len = strlen(s);
+    if (len > 16)
+        len = 16;
     memcpy(buf, s, len);
 
     lcd_send_string(buf);
@@ -158,6 +299,10 @@ void lcd_send_string_safe(const char *s)
 /* Convenience: write 16-char-safe string at (row, col=0) */
 static void lcd_show(uint8_t row, const char *s)
 {
+    if (row > 1)
+        return;
+
+    lcd_cache_row(row, s);
     lcd_put_cur(row, 0);
     lcd_send_string_safe(s);
 }
@@ -233,7 +378,11 @@ uint8_t get_password(char *entered, uint8_t max_len)
     {
         char key = read_keypad();
 
-        if (key == 0x01) continue;          /* no key */
+        if (key == 0x01)
+        {
+            Wifi_Web_Poll();
+            continue;          /* no key */
+        }
 
         Buzzer_Beep(40);                    /* keypress click */
 
@@ -298,6 +447,8 @@ void Setup_RegisterCard(void)
 
     while (1)
     {
+        Wifi_Web_Poll();
+
         status = MFRC522_Request(PICC_REQIDL, str);
         if (status != MI_OK) { HAL_Delay(200); continue; }
 
@@ -336,7 +487,9 @@ void Setup_EnrollFingerprints(void)
         HAL_StatusTypeDef result;
         int retries = 3;
 
-        do {
+        do
+        {
+            Wifi_Web_Poll();
             result = R307_Enroll(i);
         } while (result != HAL_OK && --retries > 0);
 
@@ -350,6 +503,8 @@ void Setup_EnrollFingerprints(void)
             lcd_show(0, "Enroll Failed!");
             Buzzer_BeepDenied();
         }
+
+        Wifi_Web_Poll();
         HAL_Delay(1000);
     }
 }
@@ -406,7 +561,9 @@ int main(void)
     MX_I2C2_Init();
     MX_SPI1_Init();
     MX_USART1_UART_Init();
+    MX_USART2_UART_Init();
     MX_USART6_UART_Init();
+    DWT_Delay_Init();
 
     /* Make sure outputs are in a safe state */
     Buzzer_Off();
@@ -427,6 +584,21 @@ int main(void)
     /* ── LCD init ────────────────────────────────────────────────────── */
     lcd_init();
     lcd_clear();
+
+    /* ── WiFi web mirror on ESP8266 SoftAP ───────────────────────────── */
+    lcd_show(0, "WiFi starting");
+    lcd_show(1, WIFI_AP_SSID);
+    Wifi_Enable();
+    if (Wifi_Web_Start())
+    {
+        lcd_show(0, "WiFi Ready!");
+        lcd_show(1, "192.168.4.1");
+    }
+    else
+    {
+        lcd_show(0, "WiFi Offline");
+        lcd_show(1, "Auth only");
+    }
 
     /* ── MPU6050 init on I2C2 (non-blocking, just disable tamper if it fails) */
     uint8_t mpu_ok = 0;
@@ -514,6 +686,8 @@ SETUP:
      * ════════════════════════════════════════════════════════════════════ */
     while (1)
     {
+        Wifi_Web_Poll();
+
         /* ── Reset button check ──────────────────────────────────────── */
         if (ResetButton_IsPressed())
         {
@@ -955,7 +1129,7 @@ static void MX_GPIO_Init(void)
   HAL_GPIO_WritePin(GPIOA, GPIO_PIN_4, GPIO_PIN_RESET);
 
   /*Configure GPIO pin Output Level */
-  HAL_GPIO_WritePin(GPIOB, GPIO_PIN_0|GPIO_PIN_2|R4_Pin|R3_Pin
+  HAL_GPIO_WritePin(GPIOB, GPIO_PIN_0|GPIO_PIN_2|GPIO_PIN_6|GPIO_PIN_11|R4_Pin|R3_Pin
                           |R2_Pin|R1_Pin, GPIO_PIN_RESET);
 
   /*Configure GPIO pins : PC13 PC15 */
@@ -978,9 +1152,9 @@ static void MX_GPIO_Init(void)
   GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
   HAL_GPIO_Init(GPIOA, &GPIO_InitStruct);
 
-  /*Configure GPIO pins : PB0 PB2 R4_Pin R3_Pin
+  /*Configure GPIO pins : PB0 PB2 PB6 PB11 R4_Pin R3_Pin
                            R2_Pin R1_Pin */
-  GPIO_InitStruct.Pin = GPIO_PIN_0|GPIO_PIN_2|R4_Pin|R3_Pin
+  GPIO_InitStruct.Pin = GPIO_PIN_0|GPIO_PIN_2|GPIO_PIN_6|GPIO_PIN_11|R4_Pin|R3_Pin
                           |R2_Pin|R1_Pin;
   GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
   GPIO_InitStruct.Pull = GPIO_NOPULL;
@@ -999,6 +1173,13 @@ static void MX_GPIO_Init(void)
 }
 
 /* USER CODE BEGIN 4 */
+void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart)
+{
+    if (huart->Instance == USART2)
+    {
+        Wifi_RxCallBack();
+    }
+}
 
 /* USER CODE END 4 */
 
