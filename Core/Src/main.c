@@ -753,10 +753,12 @@ SETUP:
         lcd_clear();
         lcd_show(0, "Card OK!");
         lcd_show(1, "Place finger...");
+        Wifi_Web_Poll();
         HAL_Delay(1000);
 
         /* ── STEP 2: Fingerprint ─────────────────────────────────────── */
         uint16_t matched_id, score;
+        Wifi_Web_Poll();
         HAL_StatusTypeDef fp_status = R307_Verify(&matched_id, &score);
 
         if (fp_status != HAL_OK)
@@ -764,6 +766,7 @@ SETUP:
             lcd_clear();
             lcd_show(0, "Bad Fingerprint!");
             lcd_show(1, "Access Denied");
+            Wifi_Web_Poll();
             Buzzer_BeepDenied();
             HAL_Delay(2000);
             lcd_show_idle();
@@ -774,6 +777,7 @@ SETUP:
         lcd_clear();
         lcd_show(0, "Finger OK!");
         lcd_show(1, "Enter Password:");
+        Wifi_Web_Poll();
         HAL_Delay(1000);
 
         /* ── STEP 3: Password ────────────────────────────────────────── */
@@ -805,6 +809,7 @@ SETUP:
                 else          snprintf(remain, sizeof(remain), "Locked out!");
                 lcd_show(1, remain);
 
+                Wifi_Web_Poll();
                 Buzzer_BeepDenied();
                 HAL_Delay(1500);
             }
@@ -817,23 +822,33 @@ SETUP:
         {
             lcd_show(0, "Access Granted!");
             lcd_show(1, "Welcome!");
+            Wifi_Web_Poll();
             Buzzer_BeepGranted();
 
             Solenoid_Unlock();
-            HAL_Delay(3000);
+            for (int unlock_poll = 0; unlock_poll < 30; unlock_poll++)
+            {
+                Wifi_Web_Poll();
+                HAL_Delay(100);
+            }
             Solenoid_Lock();
         }
         else
         {
             lcd_show(0, "Access Denied!");
             lcd_show(1, "Too many tries");
+            Wifi_Web_Poll();
             Buzzer_Alarm(1500);
             HAL_Delay(1500);
         }
 
+        Wifi_Web_Poll();
+
         /* RFID reset between transactions */
+        Wifi_Web_Poll();
         HAL_Delay(100);
         MFRC522_Init();
+        Wifi_Web_Poll();
         HAL_Delay(50);
 
         memset(str, 0, sizeof(str));
@@ -847,6 +862,7 @@ SETUP:
             last_mpu_poll = HAL_GetTick();
         }
 
+        Wifi_Web_Poll();
         lcd_show_idle();
     }
 }
