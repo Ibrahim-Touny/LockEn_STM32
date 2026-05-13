@@ -297,12 +297,10 @@ static void lcd_clear_sync(void)
   Wifi_Web_Clear();
 }
 
-#define lcd_clear lcd_clear_sync
-
 /* Show idle prompt */
 static void lcd_show_idle(void)
 {
-    lcd_clear();
+  lcd_clear_sync();
     lcd_show(0, "Scan your card");
     lcd_show(1, "");
 }
@@ -430,7 +428,7 @@ uint8_t ResetButton_IsPressed(void)
  * ───────────────────────────────────────────────────────────────────────── */
 void Setup_RegisterCard(void)
 {
-    lcd_clear();
+  lcd_clear_sync();
     lcd_show(0, "Scan Admin Card");
     lcd_show(1, "to Register...");
 
@@ -447,7 +445,7 @@ void Setup_RegisterCard(void)
 
         Buzzer_BeepOK();
 
-        lcd_clear();
+        lcd_clear_sync();
         lcd_show(0, "Card Saved!");
 
         char uidMsg[17];
@@ -463,7 +461,7 @@ void Setup_RegisterCard(void)
 
 void Setup_EnrollFingerprints(void)
 {
-    lcd_clear();
+  lcd_clear_sync();
     lcd_show(0, "Enrolling FP...");
 
     for (int i = 1; i <= NUM_FINGERS; i++)
@@ -496,7 +494,7 @@ void Setup_EnrollFingerprints(void)
 
 void Setup_RegisterPassword(void)
 {
-    lcd_clear();
+  lcd_clear_sync();
     lcd_show(0, "Set Password:");
     lcd_show(1, "Then press #");
     HAL_Delay(1500);
@@ -505,7 +503,7 @@ void Setup_RegisterPassword(void)
     get_password(SAVED_PASSWORD, PASSWORD_LEN);
 
     Buzzer_BeepOK();
-    lcd_clear();
+    lcd_clear_sync();
     lcd_show(0, "Password Saved!");
     HAL_Delay(1500);
 }
@@ -566,7 +564,7 @@ int main(void)
 
     /* ── LCD init ────────────────────────────────────────────────────── */
     lcd_init();
-    lcd_clear();
+    lcd_clear_sync();
 
     /* ── ESP8266 web mirror ─────────────────────────────────────────── */
     Wifi_Web_Init();
@@ -637,7 +635,7 @@ SETUP:
     Setup_EnrollFingerprints();
     Setup_RegisterPassword();
 
-    lcd_clear();
+    lcd_clear_sync();
     lcd_show(0, "Setup Done!");
     lcd_show(1, "Scan your card");
     HAL_Delay(2000);
@@ -667,7 +665,7 @@ SETUP:
             {
                 Solenoid_Lock();
                 Buzzer_Beep(200);
-                lcd_clear();
+                lcd_clear_sync();
                 lcd_show(0, "Resetting...");
                 lcd_show(1, "Please wait");
                 HAL_Delay(1500);
@@ -687,7 +685,7 @@ SETUP:
             last_mpu_poll = HAL_GetTick();
             if (MPU_CheckTamper(accel_prev, gyro_prev))
             {
-                lcd_clear();
+                lcd_clear_sync();
                 lcd_show(0, "!! TAMPER !!");
                 lcd_show(1, "Device moved");
                 Buzzer_Alarm(TAMPER_ALARM_MS);
@@ -710,7 +708,7 @@ SETUP:
         if (memcmp(sNum, AUTH_CARD, 5) != 0)
         {
             /* Unknown card */
-            lcd_clear();
+            lcd_clear_sync();
             lcd_show(0, "Access Denied!");
             lcd_show(1, "Unknown Card");
             Buzzer_BeepDenied();
@@ -721,7 +719,7 @@ SETUP:
 
         /* Card matched */
         Buzzer_BeepOK();
-        lcd_clear();
+            lcd_clear_sync();
         lcd_show(0, "Card OK!");
         lcd_show(1, "Place finger...");
         HAL_Delay(1000);
@@ -732,7 +730,7 @@ SETUP:
 
         if (fp_status != HAL_OK)
         {
-            lcd_clear();
+            lcd_clear_sync();
             lcd_show(0, "Bad Fingerprint!");
             lcd_show(1, "Access Denied");
             Buzzer_BeepDenied();
@@ -742,7 +740,7 @@ SETUP:
         }
 
         Buzzer_BeepOK();
-        lcd_clear();
+        lcd_clear_sync();
         lcd_show(0, "Finger OK!");
         lcd_show(1, "Enter Password:");
         HAL_Delay(1000);
@@ -767,7 +765,7 @@ SETUP:
             }
             else
             {
-                lcd_clear();
+                lcd_clear_sync();
                 lcd_show(0, "Wrong Password!");
 
                 char remain[17];
@@ -782,7 +780,7 @@ SETUP:
         }
 
         /* ── Final outcome ───────────────────────────────────────────── */
-        lcd_clear();
+        lcd_clear_sync();
 
         if (pass_ok)
         {

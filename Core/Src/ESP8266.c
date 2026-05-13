@@ -944,8 +944,6 @@ bool  Wifi_TcpIp_SendDataTcp(uint8_t LinkId,uint16_t dataLen,uint8_t *data)
 			sprintf((char*)Wifi.TxBuffer,"AT+CIPSENDBUF=%d,%d\r\n",LinkId,dataLen);
 		if(Wifi_SendString((char*)Wifi.TxBuffer)==false)
 			break;
-		if(Wifi_WaitForString(_WIFI_WAIT_TIME_LOW,&result,2,"OK","ERROR")==false)
-			break;
 		if(Wifi_WaitForString(_WIFI_WAIT_TIME_LOW,&result,3,">","ERROR","busy")==false)
 			break;
 		if(result > 1)
@@ -954,6 +952,9 @@ bool  Wifi_TcpIp_SendDataTcp(uint8_t LinkId,uint16_t dataLen,uint8_t *data)
 		Wifi_SendRaw(data,dataLen);
 		if(Wifi_WaitForString(_WIFI_WAIT_TIME_LOW,&result,2,"OK","ERROR")==false)
 			break;
+		if(result == 2)
+			break;
+		returnVal=true;
 	}while(0);
 	return returnVal;
 }
