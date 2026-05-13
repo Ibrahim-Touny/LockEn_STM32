@@ -21,6 +21,7 @@
 #include "rc522.h"
 #include "R307.h"
 #include "mpu6050.h"
+#include "ESP8266.h"
 
 /* ── MPU6050 motion / tamper detection tuning ───────────────────────────── */
 /* For AFS=8G (4096 LSB/g) and FS=1000 dps (32.8 LSB/dps).
@@ -65,6 +66,19 @@ uint8_t sNum[5];          /* scanned card UID */
 uint8_t AUTH_CARD[5]                      = {0};
 char    SAVED_PASSWORD[PASSWORD_LEN + 1]  = {0};
 
+/* ── Web mirror for LCD states ─────────────────────────────────────────── */
+#define WIFI_WEB_AP_SSID   "LockEn_LCD"
+#define WIFI_WEB_AP_PASS   ""
+#define WIFI_WEB_PORT      80U
+
+typedef struct
+{
+  char line[2][17];
+  uint8_t ready;
+} WifiWebState_t;
+
+static WifiWebState_t wifi_web = {0};
+
 /* ── Private prototypes ─────────────────────────────────────────────────── */
 void SystemClock_Config(void);
 static void MX_GPIO_Init(void);
@@ -78,6 +92,117 @@ static void MX_USART6_UART_Init(void);
 static uint16_t u16_abs_i16(int16_t v)
 {
     return (v < 0) ? (uint16_t)(-v) : (uint16_t)v;
+}
+
+static void Wifi_Web_CopyLine(char *dst, const char *src)
+{
+  memset(dst, ' ', 16);
+  dst[16] = '\0';
+
+  if (src == NULL)
+  {
+    return;
+  }
+
+  size_t len = strlen(src);
+  if (len > 16) len = 16;
+  memcpy(dst, src, len);
+}
+
+static void Wifi_Web_SetLine(uint8_t row, const char *text)
+{
+  if (row > 1)
+  {
+    return;
+  }
+
+  Wifi_Web_CopyLine(wifi_web.line[row], text);
+}
+
+static void Wifi_Web_Clear(void)
+{
+  Wifi_Web_CopyLine(wifi_web.line[0], "");
+  Wifi_Web_CopyLine(wifi_web.line[1], "");
+}
+
+static void Wifi_Web_BuildPage(char *page, size_t page_size)
+{
+  snprintf(page, page_size,
+       "HTTP/1.1 200 OK\r\n"
+       "Content-Type: text/html\r\n"
+       "Connection: close\r\n\r\n"
+       "<meta http-equiv=\"refresh\" content=\"1\"><pre>"
+       "LOCKEN LCD\n"
+       "1: %s\n"
+       "2: %s\n"
+       "</pre>",
+       wifi_web.line[0], wifi_web.line[1]);
+}
+
+static void Wifi_Web_Task(void)
+{
+  if (!wifi_web.ready)
+  {
+    return;
+  }
+
+  if (Wifi.RxBuffer[0] == '\0')
+  {
+    return;
+  }
+
+  char *ipd = strstr((char *)Wifi.RxBuffer, "+IPD,");
+  if (ipd == NULL)
+  {
+    return;
+  }
+
+  ipd += 5;
+  uint8_t link_id = (uint8_t)strtoul(ipd, NULL, 10);
+
+  char page[256];
+  Wifi_Web_BuildPage(page, sizeof(page));
+  Wifi_TcpIp_SendDataTcp(link_id, (uint16_t)strlen(page), (uint8_t *)page);
+  Wifi_TcpIp_Close(link_id);
+  Wifi_RxClear();
+}
+
+static void Wifi_Web_Init(void)
+{
+  wifi_web.ready = 0;
+
+  if (Wifi_Init() == false)
+  {
+    return;
+  }
+
+  if (Wifi_SetMode(WifiMode_SoftAp) == false)
+  {
+    return;
+  }
+
+  if (Wifi_SoftAp_Create((char *)WIFI_WEB_AP_SSID,
+               (char *)WIFI_WEB_AP_PASS,
+               1,
+               WifiEncryptionType_Open,
+               4,
+               false) == false)
+  {
+    return;
+  }
+
+  if (Wifi_TcpIp_SetMultiConnection(true) == false)
+  {
+    return;
+  }
+
+  if (Wifi_TcpIp_SetEnableTcpServer(WIFI_WEB_PORT) == false)
+  {
+    return;
+  }
+
+  Wifi_RxClear();
+  wifi_web.ready = 1;
 }
 
 /* ─────────────────────────────────────────────────────────────────────────
@@ -160,7 +285,16 @@ static void lcd_show(uint8_t row, const char *s)
 {
     lcd_put_cur(row, 0);
     lcd_send_string_safe(s);
+  Wifi_Web_SetLine(row, s);
 }
+
+static void lcd_clear_sync(void)
+{
+  lcd_clear();
+  Wifi_Web_Clear();
+}
+
+#define lcd_clear lcd_clear_sync
 
 /* Show idle prompt */
 static void lcd_show_idle(void)
@@ -231,6 +365,7 @@ uint8_t get_password(char *entered, uint8_t max_len)
 
     while (1)
     {
+      Wifi_Web_Task();
         char key = read_keypad();
 
         if (key == 0x01) continue;          /* no key */
@@ -298,6 +433,7 @@ void Setup_RegisterCard(void)
 
     while (1)
     {
+      Wifi_Web_Task();
         status = MFRC522_Request(PICC_REQIDL, str);
         if (status != MI_OK) { HAL_Delay(200); continue; }
 
@@ -329,6 +465,7 @@ void Setup_EnrollFingerprints(void)
 
     for (int i = 1; i <= NUM_FINGERS; i++)
     {
+      Wifi_Web_Task();
         char msg[17];
         snprintf(msg, sizeof(msg), "Enroll Finger %d", i);
         lcd_show(0, msg);
@@ -428,6 +565,9 @@ int main(void)
     lcd_init();
     lcd_clear();
 
+    /* ── ESP8266 web mirror ─────────────────────────────────────────── */
+    Wifi_Web_Init();
+
     /* ── MPU6050 init on I2C2 (non-blocking, just disable tamper if it fails) */
     uint8_t mpu_ok = 0;
     int16_t accel_prev[3] = {0};
@@ -514,6 +654,8 @@ SETUP:
      * ════════════════════════════════════════════════════════════════════ */
     while (1)
     {
+      Wifi_Web_Task();
+
         /* ── Reset button check ──────────────────────────────────────── */
         if (ResetButton_IsPressed())
         {
@@ -676,6 +818,14 @@ SETUP:
         lcd_show_idle();
     }
 }
+
+    void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart)
+    {
+      if (huart->Instance == USART2)
+      {
+        Wifi_RxCallBack();
+      }
+    }
 /**
   * @brief System Clock Configuration
   * @retval None
