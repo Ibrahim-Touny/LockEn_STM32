@@ -171,6 +171,9 @@ static void Wifi_Web_Init(void)
 {
   wifi_web.ready = 0;
 
+  Wifi_Enable();
+  HAL_Delay(1000);
+
   if (Wifi_Init() == false)
   {
     return;
