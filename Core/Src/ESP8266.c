@@ -953,8 +953,8 @@ bool  Wifi_TcpIp_SendDataTcp(uint8_t LinkId,uint16_t dataLen,uint8_t *data)
 		Wifi_RxClear();
 		Wifi_SendRaw(data,dataLen);
 		if(Wifi_WaitForString(_WIFI_WAIT_TIME_LOW,&result,2,"OK","ERROR")==false)
-			break;
-		returnVal=true;
+
+		sprintf((char*)Wifi.TxBuffer,"AT+CIPSERVER=1,%d\r\n",PortNumber);
 	}while(0);
 	return returnVal;
 }
