@@ -428,17 +428,41 @@ int main(void)
     lcd_init();
     lcd_clear();
 
-    /* ── MPU6050 init on I2C2 (non-blocking, just disable tamper if it fails) */
+    /* ── RFID + MPU6050 init checks ───────────────────────────────────── */
+    uint8_t rfid_ok = 1;
     uint8_t mpu_ok = 0;
     int16_t accel_prev[3] = {0};
     int16_t gyro_prev[3]  = {0};
     uint32_t last_mpu_poll = 0;
+
+    {
+      uchar rfid_ver = Read_MFRC522(VersionReg);
+      if (rfid_ver == 0x00 || rfid_ver == 0xFF)
+      {
+        rfid_ok = 0;
+        lcd_clear();
+        lcd_show(0, "RFID NOT FOUND");
+        lcd_show(1, "RFID Disabled");
+        Buzzer_BeepDenied();
+        HAL_Delay(5000);
+        lcd_clear();
+      }
+    }
 
     if (MPU6050_Init(&hi2c2, MPU6050_ACCEL_RANGE_8G, MPU6050_GYRO_RANGE_1000) == INIT_SUCCESS)
     {
         MPU6050_getAccelValue(&hi2c2, accel_prev);
         MPU6050_getGyroValue(&hi2c2, gyro_prev);
         mpu_ok = 1;
+    }
+    else
+    {
+      lcd_clear();
+      lcd_show(0, "MPU NOT FOUND");
+      lcd_show(1, "Tamper Disabled");
+      Buzzer_BeepDenied();
+      HAL_Delay(5000);
+      lcd_clear();
     }
 
     /* ── Fingerprint sensor init ─────────────────────────────────────── */
@@ -490,7 +514,10 @@ SETUP:
 
     R307_ClearAllFingerprints();
 
-    Setup_RegisterCard();
+    if (rfid_ok)
+    {
+      Setup_RegisterCard();
+    }
     Setup_EnrollFingerprints();
     Setup_RegisterPassword();
 
@@ -553,17 +580,19 @@ SETUP:
             }
         }
 
-        /* ── STEP 1: Scan RFID card ──────────────────────────────────── */
-        status = MFRC522_Request(PICC_REQIDL, str);
-        if (status != MI_OK) { HAL_Delay(200); continue; }
-
-        status = MFRC522_Anticoll(str);
-        if (status != MI_OK) { HAL_Delay(200); continue; }
-
-        memcpy(sNum, str, 5);
-
-        if (memcmp(sNum, AUTH_CARD, 5) != 0)
+        /* ── STEP 1: Scan RFID card (if enabled) ─────────────────────── */
+        if (rfid_ok)
         {
+          status = MFRC522_Request(PICC_REQIDL, str);
+          if (status != MI_OK) { HAL_Delay(200); continue; }
+
+          status = MFRC522_Anticoll(str);
+          if (status != MI_OK) { HAL_Delay(200); continue; }
+
+          memcpy(sNum, str, 5);
+
+          if (memcmp(sNum, AUTH_CARD, 5) != 0)
+          {
             /* Unknown card */
             lcd_clear();
             lcd_show(0, "Access Denied!");
@@ -572,16 +601,23 @@ SETUP:
             HAL_Delay(2000);
             lcd_show_idle();
             continue;
+          }
+
+          /* Card matched */
+          Buzzer_BeepOK();
+          lcd_clear();
+          lcd_show(0, "Card OK!");
+          lcd_show(1, "Place finger...");
+          HAL_Delay(1000);
         }
 
-        /* Card matched */
-        Buzzer_BeepOK();
-        lcd_clear();
-        lcd_show(0, "Card OK!");
-        lcd_show(1, "Place finger...");
-        HAL_Delay(1000);
-
         /* ── STEP 2: Fingerprint ─────────────────────────────────────── */
+        if (!rfid_ok)
+        {
+          lcd_clear();
+          lcd_show(0, "Place finger...");
+          HAL_Delay(800);
+        }
         uint16_t matched_id, score;
         HAL_StatusTypeDef fp_status = R307_Verify(&matched_id, &score);
 

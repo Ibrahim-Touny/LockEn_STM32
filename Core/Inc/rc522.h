@@ -116,6 +116,7 @@ extern SPI_HandleTypeDef hspi1;
 
 // Functions for manipulating the MFRC522
 void MFRC522_Init(void);
+uchar Read_MFRC522(uchar addr);
 uchar MFRC522_Request(uchar reqMode, uchar *TagType);
 uchar MFRC522_Anticoll(uchar *serNum);
 uchar MFRC522_SelectTag(uchar *serNum);
