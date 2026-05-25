@@ -6,7 +6,11 @@
       "Bash(Get-ChildItem -Path \"C:\\\\Users\\\\Ibrahim.ElTouny\\\\Documents\\\\Projects\\\\LockEn_STM32\" -Recurse -File -Filter \"*ESP*\")",
       "Bash(Select-Object FullName)",
       "Bash(grep \"\\\\.h$\")",
-      "Bash(ls \"C:\\\\Users\\\\Ibrahim.ElTouny\\\\.claude\\\\plans\" 2>/dev/null || echo \"directory does not exist\")"
+      "Bash(ls \"C:\\\\Users\\\\Ibrahim.ElTouny\\\\.claude\\\\plans\" 2>/dev/null || echo \"directory does not exist\")",
+      "Bash(Get-ChildItem -Path \"C:\\\\Users\\\\Ibrahim.ElTouny\\\\Documents\\\\Projects\\\\LockEn_STM32\" -Recurse -Force)",
+      "Bash(Select-Object FullName, PSIsContainer)",
+      "Bash(Sort-Object FullName)",
+      "Bash(ConvertTo-Json -Depth 100)"
     ]
   }
 }

@@ -138,7 +138,9 @@ void MFRC522_Init(void)
 {
 	HAL_GPIO_WritePin(MFRC522_CS_PORT,MFRC522_CS_PIN,GPIO_PIN_SET);
 	HAL_GPIO_WritePin(MFRC522_RST_PORT,MFRC522_RST_PIN,GPIO_PIN_SET);
+	HAL_Delay(10);   /* chip needs ~37 µs after RST; 10 ms is generous */
 	MFRC522_Reset();
+	HAL_Delay(10);   /* same guard after soft reset before register writes */
 
 	//Timer: TPrescaler*TreloadVal/6.78MHz = 24ms
 	Write_MFRC522(TModeReg, 0x8D);		//Tauto=1; f(Timer) = 6.78MHz/TPreScaler

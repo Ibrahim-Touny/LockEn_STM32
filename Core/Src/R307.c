@@ -1,5 +1,6 @@
 // r307.c
 #include "r307.h"
+#include "cmsis_os.h"
 #include <string.h>
 #include <stdio.h>
 
@@ -291,7 +292,7 @@ static HAL_StatusTypeDef WaitForFingerRemoval(uint32_t timeout_ms)
             return HAL_TIMEOUT;
         }
 
-        HAL_Delay(300);  // Wait before next check
+        osDelay(300);  // Wait before next check
     }
 }
 
@@ -328,7 +329,7 @@ static HAL_StatusTypeDef WaitForFingerPlacement(uint32_t timeout_ms)
             return HAL_TIMEOUT;
         }
 
-        HAL_Delay(300);  // Wait before next check
+        osDelay(300);  // Wait before next check
     }
 }
 
@@ -349,7 +350,7 @@ HAL_StatusTypeDef R307_Enroll(uint16_t page_id)
 
     FP_LOG("Capturing finger...");
     while (R307_CaptureFinger() != HAL_OK) {
-        HAL_Delay(200); // wait and retry
+        osDelay(200); // wait and retry
     }
     if (R307_Image2Tz(1) != HAL_OK) {
         FP_LOG("Failed to convert first image");
@@ -372,7 +373,7 @@ HAL_StatusTypeDef R307_Enroll(uint16_t page_id)
 
     FP_LOG("Capturing finger again...");
     while (R307_CaptureFinger() != HAL_OK) {
-        HAL_Delay(200); // wait and retry
+        osDelay(200); // wait and retry
     }
 
     if (R307_Image2Tz(2) != HAL_OK) {
@@ -418,7 +419,7 @@ HAL_StatusTypeDef R307_Verify(uint16_t *out_page_id, uint16_t *out_score)
 
     FP_LOG("Capturing finger...");
     while (R307_CaptureFinger() != HAL_OK) {
-        HAL_Delay(200); // wait and retry
+        osDelay(200); // wait and retry
     }
     if (R307_Image2Tz(1) != HAL_OK) return HAL_ERROR;
 
