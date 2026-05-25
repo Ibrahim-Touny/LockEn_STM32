@@ -27,31 +27,20 @@ extern "C" {
 extern UART_HandleTypeDef R307_UART;
 
 #define USE_DEBUG_LOG 	0  // Debug all the steps
-#define USE_MAIN_LOG	1  // only the user intractable Logs
+#define USE_MAIN_LOG	1  // user-facing logs (runtime enable/disable)
 
-/* Logging: override FP_LOG before include to route logs elsewhere */
+/* UI log control (implemented in r307.c). */
+void R307_SetUiLogEnabled(uint8_t enable);
+void R307_UiLog(const char *fmt, ...);
+
 #if USE_MAIN_LOG
-#define FP_LOG(fmt, ...)  do {                     \
-        char lcd_buf[17];                              \
-        snprintf(lcd_buf, sizeof(lcd_buf), fmt, ##__VA_ARGS__); \
-        lcd_put_cur(1, 0);                             \
-        lcd_send_string("                ");           \
-        lcd_put_cur(1, 0);                             \
-        lcd_send_string(lcd_buf);                      \
-    } while(0)
+#define FP_LOG(fmt, ...)  R307_UiLog(fmt, ##__VA_ARGS__)
 #else
-    #define FP_LOG(fmt, ...)  ((void)0)
+#define FP_LOG(fmt, ...)  ((void)0)
 #endif
 
 #if USE_DEBUG_LOG
-    #define DB_LOG(fmt, ...)  do {                     \
-        char lcd_buf[17];                              \
-        snprintf(lcd_buf, sizeof(lcd_buf), fmt, ##__VA_ARGS__); \
-        lcd_put_cur(1, 0);                             \
-        lcd_send_string("                ");           \
-        lcd_put_cur(1, 0);                             \
-        lcd_send_string(lcd_buf);                      \
-    } while(0)
+#define DB_LOG(fmt, ...)  R307_UiLog(fmt, ##__VA_ARGS__)
 #else
 #define DB_LOG(fmt, ...)  ((void)0)
 #endif

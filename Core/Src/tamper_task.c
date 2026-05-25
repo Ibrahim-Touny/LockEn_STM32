@@ -8,6 +8,12 @@
 #define MPU_GYRO_THRESHOLD   2000U  /* ~61 dps  (FS=1000dps, 32.8 LSB/dps)  */
 #define MPU_POLL_MS          200U
 
+const osThreadAttr_t tamperTask_attr = {
+    .name       = "TamperTask",
+    .stack_size = 512,
+    .priority   = (osPriority_t) osPriorityBelowNormal,
+};
+
 QueueHandle_t    g_tamperEvt = NULL;
 volatile uint8_t g_mpu_ok    = 0;
 

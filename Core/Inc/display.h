@@ -1,17 +1,18 @@
 #pragma once
 #include <stdint.h>
+#include "cmsis_os.h"
 
-/* Write text to one LCD row (safe: truncates/pads to exactly 16 chars) */
+/* Created by Display_Init(); used by PwdTask for direct LCD character echo */
+extern osMutexId_t g_lcd_mutex;
+
+/* Must be called once from AuthTask before g_creds_ready is set */
+void Display_Init(void);
+
 void Display_Line(uint8_t row, const char *text);
-
-/* Write both rows at once */
 void Display_Both(const char *top, const char *bot);
 
-/* Write both rows then osDelay(ms). Pass ms=0 to display without waiting */
+/* Shows both rows then yields for ms. Mutex released BEFORE the delay. */
 void Display_Timed(const char *top, const char *bot, uint32_t ms);
 
-/* Show idle prompt: "Scan your card" on row 0, blank row 1 */
 void Display_Idle(void);
-
-/* Show "** ERROR **" on row 0 and msg on row 1 */
 void Display_Error(const char *msg);

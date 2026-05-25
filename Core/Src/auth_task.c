@@ -1,12 +1,15 @@
 #include "auth_task.h"
 #include "storage.h"
 #include "display.h"
+#include "buzzer.h"
+#include "keypad.h"
 #include "tamper_task.h"
 #include "main.h"
 #include "rc522.h"
 #include "R307.h"
 #include "mpu6050.h"
 #include "i2c-lcd.h"
+#include "periph_init.h"
 #include "FreeRTOS.h"
 #include "queue.h"
 #include "cmsis_os.h"
@@ -18,75 +21,32 @@
 #define RESET_BTN_PIN   GPIO_PIN_1
 #define SOLENOID_PORT   GPIOB
 #define SOLENOID_PIN    GPIO_PIN_2
-#define BUZZER_PORT     GPIOC
-#define BUZZER_PIN      GPIO_PIN_15
 
-/* ── Config ─────────────────────────────────────────────────────────────── */
-#define PASSWORD_LEN      4
-#define MAX_ATTEMPTS      3
-#define NUM_FINGERS       1
-#define UNLOCK_MS         3000U
-#define LOCKOUT_ALARM_MS  1500U
+#define PASSWORD_LEN  4
+#define NUM_FINGERS   1
+#define UNLOCK_MS     3000U
+#define SESSION_TIMEOUT_MS  30000U
 
-/* ── State machine ──────────────────────────────────────────────────────── */
-typedef enum {
-    AUTH_ST_INIT,
-    AUTH_ST_SETUP,
-    AUTH_ST_IDLE,
-    AUTH_ST_FP,
-    AUTH_ST_PWD,
-    AUTH_ST_GRANTED,
-    AUTH_ST_ERROR,
-} AuthState_t;
+/* ── Task attributes ────────────────────────────────────────────────────── */
+const osThreadAttr_t authTask_attr = {
+    .name       = "AuthTask",
+    .stack_size = 2048,
+    .priority   = (osPriority_t) osPriorityNormal,
+};
+
+/* ── Shared globals (declared extern in auth_task.h) ────────────────────── */
+QueueHandle_t     g_authEvt   = NULL;
+volatile uint8_t  g_creds_ready = 0;
+volatile uint32_t g_session_id  = 0;
+CredentialStore_t g_creds;
 
 /* ── Module state ───────────────────────────────────────────────────────── */
-static uint8_t          s_rfid_ok;
-static CredentialStore_t s_creds;
+static uint8_t s_rfid_ok = 0;
 
-/* ── External handles ───────────────────────────────────────────────────── */
-extern I2C_HandleTypeDef  hi2c1;
-extern I2C_HandleTypeDef  hi2c2;
-extern UART_HandleTypeDef huart1;
-
-/* ═══════════════════════════════════════════════════════════════════════════
- *  BUZZER
- * ═══════════════════════════════════════════════════════════════════════════ */
-static void Buzzer_On(void)  { HAL_GPIO_WritePin(BUZZER_PORT, BUZZER_PIN, GPIO_PIN_SET); }
-static void Buzzer_Off(void) { HAL_GPIO_WritePin(BUZZER_PORT, BUZZER_PIN, GPIO_PIN_RESET); }
-
-static void Buzzer_Beep(uint16_t ms)
-{
-    Buzzer_On();
-    osDelay(ms);
-    Buzzer_Off();
-}
-
-static void Buzzer_BeepOK(void)
-{
-    Buzzer_Beep(80); osDelay(80); Buzzer_Beep(80);
-}
-
-static void Buzzer_BeepGranted(void) { Buzzer_Beep(400); }
-
-static void Buzzer_BeepDenied(void)
-{
-    for (int i = 0; i < 3; i++) { Buzzer_Beep(120); osDelay(100); }
-}
-
-static void Buzzer_Alarm(uint32_t total_ms)
-{
-    uint32_t start = HAL_GetTick();
-    while ((HAL_GetTick() - start) < total_ms)
-    {
-        Buzzer_On();  osDelay(100);
-        Buzzer_Off(); osDelay(100);
-    }
-}
-
-/* ═══════════════════════════════════════════════════════════════════════════
- *  SOLENOID / RESET BUTTON
- * ═══════════════════════════════════════════════════════════════════════════ */
-static void Solenoid_Unlock(void) { HAL_GPIO_WritePin(SOLENOID_PORT, SOLENOID_PIN, GPIO_PIN_SET); }
+/* ════════════════════════════════════════════════════════════════════════════
+ *  HARDWARE HELPERS
+ * ════════════════════════════════════════════════════════════════════════════ */
+static void Solenoid_Unlock(void) { HAL_GPIO_WritePin(SOLENOID_PORT, SOLENOID_PIN, GPIO_PIN_SET);   }
 static void Solenoid_Lock(void)   { HAL_GPIO_WritePin(SOLENOID_PORT, SOLENOID_PIN, GPIO_PIN_RESET); }
 
 static uint8_t ResetButton_IsPressed(void)
@@ -94,69 +54,25 @@ static uint8_t ResetButton_IsPressed(void)
     return (HAL_GPIO_ReadPin(RESET_BTN_PORT, RESET_BTN_PIN) == GPIO_PIN_RESET);
 }
 
-/* ═══════════════════════════════════════════════════════════════════════════
- *  KEYPAD
- * ═══════════════════════════════════════════════════════════════════════════ */
-static char read_keypad(void)
-{
-    /* Row 1 */
-    HAL_GPIO_WritePin(R1_GPIO_Port, R1_Pin, GPIO_PIN_RESET);
-    HAL_GPIO_WritePin(R2_GPIO_Port, R2_Pin, GPIO_PIN_SET);
-    HAL_GPIO_WritePin(R3_GPIO_Port, R3_Pin, GPIO_PIN_SET);
-    HAL_GPIO_WritePin(R4_GPIO_Port, R4_Pin, GPIO_PIN_SET);
-    if (!HAL_GPIO_ReadPin(C1_GPIO_Port, C1_Pin)) { while (!HAL_GPIO_ReadPin(C1_GPIO_Port, C1_Pin)); return '1'; }
-    if (!HAL_GPIO_ReadPin(C2_GPIO_Port, C2_Pin)) { while (!HAL_GPIO_ReadPin(C2_GPIO_Port, C2_Pin)); return '2'; }
-    if (!HAL_GPIO_ReadPin(C3_GPIO_Port, C3_Pin)) { while (!HAL_GPIO_ReadPin(C3_GPIO_Port, C3_Pin)); return '3'; }
-    if (!HAL_GPIO_ReadPin(C4_GPIO_Port, C4_Pin)) { while (!HAL_GPIO_ReadPin(C4_GPIO_Port, C4_Pin)); return 'A'; }
-    /* Row 2 */
-    HAL_GPIO_WritePin(R1_GPIO_Port, R1_Pin, GPIO_PIN_SET);
-    HAL_GPIO_WritePin(R2_GPIO_Port, R2_Pin, GPIO_PIN_RESET);
-    HAL_GPIO_WritePin(R3_GPIO_Port, R3_Pin, GPIO_PIN_SET);
-    HAL_GPIO_WritePin(R4_GPIO_Port, R4_Pin, GPIO_PIN_SET);
-    if (!HAL_GPIO_ReadPin(C1_GPIO_Port, C1_Pin)) { while (!HAL_GPIO_ReadPin(C1_GPIO_Port, C1_Pin)); return '4'; }
-    if (!HAL_GPIO_ReadPin(C2_GPIO_Port, C2_Pin)) { while (!HAL_GPIO_ReadPin(C2_GPIO_Port, C2_Pin)); return '5'; }
-    if (!HAL_GPIO_ReadPin(C3_GPIO_Port, C3_Pin)) { while (!HAL_GPIO_ReadPin(C3_GPIO_Port, C3_Pin)); return '6'; }
-    if (!HAL_GPIO_ReadPin(C4_GPIO_Port, C4_Pin)) { while (!HAL_GPIO_ReadPin(C4_GPIO_Port, C4_Pin)); return 'B'; }
-    /* Row 3 */
-    HAL_GPIO_WritePin(R1_GPIO_Port, R1_Pin, GPIO_PIN_SET);
-    HAL_GPIO_WritePin(R2_GPIO_Port, R2_Pin, GPIO_PIN_SET);
-    HAL_GPIO_WritePin(R3_GPIO_Port, R3_Pin, GPIO_PIN_RESET);
-    HAL_GPIO_WritePin(R4_GPIO_Port, R4_Pin, GPIO_PIN_SET);
-    if (!HAL_GPIO_ReadPin(C1_GPIO_Port, C1_Pin)) { while (!HAL_GPIO_ReadPin(C1_GPIO_Port, C1_Pin)); return '7'; }
-    if (!HAL_GPIO_ReadPin(C2_GPIO_Port, C2_Pin)) { while (!HAL_GPIO_ReadPin(C2_GPIO_Port, C2_Pin)); return '8'; }
-    if (!HAL_GPIO_ReadPin(C3_GPIO_Port, C3_Pin)) { while (!HAL_GPIO_ReadPin(C3_GPIO_Port, C3_Pin)); return '9'; }
-    if (!HAL_GPIO_ReadPin(C4_GPIO_Port, C4_Pin)) { while (!HAL_GPIO_ReadPin(C4_GPIO_Port, C4_Pin)); return 'C'; }
-    /* Row 4 */
-    HAL_GPIO_WritePin(R1_GPIO_Port, R1_Pin, GPIO_PIN_SET);
-    HAL_GPIO_WritePin(R2_GPIO_Port, R2_Pin, GPIO_PIN_SET);
-    HAL_GPIO_WritePin(R3_GPIO_Port, R3_Pin, GPIO_PIN_SET);
-    HAL_GPIO_WritePin(R4_GPIO_Port, R4_Pin, GPIO_PIN_RESET);
-    if (!HAL_GPIO_ReadPin(C1_GPIO_Port, C1_Pin)) { while (!HAL_GPIO_ReadPin(C1_GPIO_Port, C1_Pin)); return '*'; }
-    if (!HAL_GPIO_ReadPin(C2_GPIO_Port, C2_Pin)) { while (!HAL_GPIO_ReadPin(C2_GPIO_Port, C2_Pin)); return '0'; }
-    if (!HAL_GPIO_ReadPin(C3_GPIO_Port, C3_Pin)) { while (!HAL_GPIO_ReadPin(C3_GPIO_Port, C3_Pin)); return '#'; }
-    if (!HAL_GPIO_ReadPin(C4_GPIO_Port, C4_Pin)) { while (!HAL_GPIO_ReadPin(C4_GPIO_Port, C4_Pin)); return 'D'; }
-
-    return 0x01;
-}
-
-/* '#' confirms, '*' is backspace, shows '*' on LCD row 1 for each digit.
- * Returns when '#' pressed with at least one digit entered.             */
+/* ════════════════════════════════════════════════════════════════════════════
+ *  PASSWORD ENTRY  (setup only — runs before g_creds_ready, no mutex needed)
+ * ════════════════════════════════════════════════════════════════════════════ */
 static void get_password(char *entered, uint8_t max_len)
 {
     uint8_t idx = 0;
-    memset(entered, 0, max_len + 1);
+    memset(entered, 0, max_len + 1u);
     Display_Line(1, "");
 
-    while (1)
+    for (;;)
     {
-        char key = read_keypad();
-        if (key == 0x01) { osDelay(10); continue; }
+        char key = Keypad_Read();
+        if (key == 0) { osDelay(10); continue; }
 
         Buzzer_Beep(40);
 
         if (key == '#')
         {
-            if (idx == 0) continue;   /* require at least one digit */
+            if (idx == 0) continue;
             entered[idx] = '\0';
             return;
         }
@@ -178,35 +94,30 @@ static void get_password(char *entered, uint8_t max_len)
             lcd_put_cur(1, idx - 1);
             lcd_send_data('*');
         }
-        osDelay(120);   /* key debounce */
+        osDelay(120);
     }
 }
 
-/* ═══════════════════════════════════════════════════════════════════════════
+/* ════════════════════════════════════════════════════════════════════════════
  *  SETUP HELPERS
- * ═══════════════════════════════════════════════════════════════════════════ */
+ * ════════════════════════════════════════════════════════════════════════════ */
 static void setup_register_card(void)
 {
     Display_Both("Scan Admin Card", "to Register...");
 
     uint8_t str[MAX_LEN];
-    while (1)
+    for (;;)
     {
-        uint8_t status = MFRC522_Request(PICC_REQIDL, str);
-        if (status != MI_OK) { osDelay(200); continue; }
+        if (MFRC522_Request(PICC_REQIDL, str) != MI_OK) { osDelay(200); continue; }
+        if (MFRC522_Anticoll(str)             != MI_OK) { osDelay(200); continue; }
 
-        status = MFRC522_Anticoll(str);
-        if (status != MI_OK) { osDelay(200); continue; }
-
-        memcpy(s_creds.uid, str, 5);
-
+        memcpy(g_creds.uid, str, 5);
         Buzzer_BeepOK();
 
-        /* UID as 10-char hex string — always fits in 16 chars */
         char uidMsg[17];
         snprintf(uidMsg, sizeof(uidMsg), "%02X%02X%02X%02X%02X",
-                 s_creds.uid[0], s_creds.uid[1], s_creds.uid[2],
-                 s_creds.uid[3], s_creds.uid[4]);
+                 g_creds.uid[0], g_creds.uid[1], g_creds.uid[2],
+                 g_creds.uid[3], g_creds.uid[4]);
         Display_Timed("Card Saved!", uidMsg, 2000);
         return;
     }
@@ -244,38 +155,36 @@ static void setup_register_password(void)
 {
     Display_Timed("Set Password:", "Then press #", 2000);
     Display_Line(0, "Enter Password:");
-    get_password(s_creds.password, PASSWORD_LEN);
+    get_password(g_creds.password, PASSWORD_LEN);
     Buzzer_BeepOK();
     Display_Timed("Password Saved!", "", 1500);
 }
 
-/* ═══════════════════════════════════════════════════════════════════════════
- *  STATE HANDLERS
- * ═══════════════════════════════════════════════════════════════════════════ */
-
-static AuthState_t do_init(void)
+/* ════════════════════════════════════════════════════════════════════════════
+ *  INIT
+ * ════════════════════════════════════════════════════════════════════════════ */
+static void do_init(void)
 {
     Buzzer_Off();
     Solenoid_Lock();
 
-    /* RFID init with post-reset settling time */
+    /* RFID init with settling time */
     MFRC522_Init();
     osDelay(500);
 
-    /* I2C1 bus reset — clears any lock-up from cold boot */
+    /* I2C1 bus reset — clears lock-up from cold boot */
     __HAL_RCC_I2C1_FORCE_RESET();
     osDelay(100);
     __HAL_RCC_I2C1_RELEASE_RESET();
     osDelay(100);
     hi2c1.State = HAL_I2C_STATE_RESET;
-    HAL_I2C_Init(&hi2c1);
+    MX_I2C1_Init();
     osDelay(100);
 
-    lcd_init();
-    lcd_clear();
+    /* LCD init + create mutex */
+    Display_Init();
 
     /* RFID version sanity check */
-    s_rfid_ok = 1;
     uint8_t rfid_ver = Read_MFRC522(VersionReg);
     if (rfid_ver == 0x00 || rfid_ver == 0xFF)
     {
@@ -283,6 +192,10 @@ static AuthState_t do_init(void)
         Buzzer_BeepDenied();
         Display_Timed("RFID NOT FOUND", "RFID Disabled", 4000);
         lcd_clear();
+    }
+    else
+    {
+        s_rfid_ok = 1;
     }
 
     /* MPU6050 init — sets g_mpu_ok which unblocks TamperTask */
@@ -292,14 +205,11 @@ static AuthState_t do_init(void)
     }
     else
     {
-        Buzzer_BeepDenied();
         Display_Timed("MPU NOT FOUND", "Tamper Disabled", 4000);
         lcd_clear();
     }
 
-    /* Fingerprint sensor init:
-     * R307 emits a 12-byte startup packet 500–2000 ms after power-on.
-     * Drain the UART until silent, then retry VerifyPassword up to 5×. */
+    /* Fingerprint sensor: drain startup packet then retry VerifyPassword */
     Display_Both("FP Init...", "");
     osDelay(2000);
     {
@@ -326,222 +236,163 @@ static AuthState_t do_init(void)
 
     if (!fp_ok)
     {
-        /* Hard fault: FP sensor not responding — show message and halt */
         Buzzer_BeepDenied();
         Display_Error("Check FP sensor!");
         for (;;) osDelay(1000);
     }
 
+    R307_SetUiLogEnabled(0);
+
     Buzzer_Beep(80);
     Display_Timed("FP Ready!", "", 1000);
-
-    /* Load stored credentials unless reset button held at boot */
-    if (Storage_HasValid() && !ResetButton_IsPressed())
-    {
-        Storage_Load(&s_creds);
-        return AUTH_ST_IDLE;
-    }
-
-    return AUTH_ST_SETUP;
 }
 
-static AuthState_t do_setup(void)
+/* ════════════════════════════════════════════════════════════════════════════
+ *  SETUP
+ * ════════════════════════════════════════════════════════════════════════════ */
+static void do_setup(void)
 {
-    memset(&s_creds, 0, sizeof(s_creds));
+    memset(&g_creds, 0, sizeof(g_creds));
     R307_ClearAllFingerprints();
     Storage_Erase();
 
     if (s_rfid_ok) setup_register_card();
+    R307_SetUiLogEnabled(1);
     setup_enroll_fingerprints();
+    R307_SetUiLogEnabled(0);
     setup_register_password();
 
-    /* Persist credentials */
-    s_creds.magic = STORAGE_MAGIC;
-    Storage_Save(&s_creds);
+    g_creds.magic = STORAGE_MAGIC;
+    Storage_Save(&g_creds);
 
-    /* Re-init RFID to clear any stale IRQ bits from setup activity */
     MFRC522_Init();
     osDelay(100);
 
-    Display_Timed("Setup Done!", "Scan your card", 2000);
-    return AUTH_ST_IDLE;
+    Display_Timed("Setup Done!", "Scan 2 factors", 2000);
 }
 
-static AuthState_t do_idle(void)
+/* ════════════════════════════════════════════════════════════════════════════
+ *  TASK ENTRY
+ * ════════════════════════════════════════════════════════════════════════════ */
+void AuthTask(void *argument)
 {
-    Display_Idle();
+    /* Queue must exist before sensor tasks check g_creds_ready */
+    g_authEvt = xQueueCreate(10, sizeof(AuthFactor_t));
 
-    /* Drain stale tamper events (may have queued during setup/unlock) */
-    if (g_tamperEvt)
-    {
-        uint8_t evt;
-        while (xQueueReceive(g_tamperEvt, &evt, 0) == pdTRUE) {}
+    do_init();
+
+    if (Storage_HasValid() && !ResetButton_IsPressed())
+        Storage_Load(&g_creds);
+    else
+        do_setup();
+
+    /* Drain any stale tamper events from init/setup */
+    if (g_tamperEvt) {
+        uint8_t discard;
+        while (xQueueReceive(g_tamperEvt, &discard, 0) == pdTRUE) {}
     }
 
-    while (1)
+    g_session_id  = 1;
+    g_creds_ready = 1;
+
+    Display_Both("Scan 2 factors", "Any order OK");
+    osDelay(1500);
+    Display_Both("Scan 2 factors", "");
+
+    uint8_t  bitmask      = 0;
+    uint32_t session_start = 0;
+
+    for (;;)
     {
-        /* ── Reset button (debounced) → re-enroll everything ─────────── */
+        /* ── Reset button → full re-setup ──────────────────────────────── */
         if (ResetButton_IsPressed())
         {
             osDelay(50);
             if (ResetButton_IsPressed())
             {
+                g_creds_ready = 0;
+                osDelay(300);           /* let sensor tasks reach idle check */
                 Solenoid_Lock();
                 Buzzer_Beep(200);
                 Display_Timed("Resetting...", "Please wait", 1500);
                 MFRC522_Init();
                 osDelay(100);
-                Storage_Erase();
-                return AUTH_ST_SETUP;
+
+                /* Drain queue before new session */
+                AuthFactor_t discard;
+                while (xQueueReceive(g_authEvt, &discard, 0) == pdTRUE) {}
+                bitmask      = 0;
+                session_start = 0;
+
+                do_setup();
+
+                /* Drain stale tamper events accumulated during setup */
+                if (g_tamperEvt) {
+                    uint8_t tevt;
+                    while (xQueueReceive(g_tamperEvt, &tevt, 0) == pdTRUE) {}
+                }
+
+                g_session_id++;
+                g_creds_ready = 1;
+                Display_Both("Scan 2 factors", "");
+                continue;
             }
         }
 
-        /* ── Tamper event from TamperTask ──────────────────────────── */
+        /* ── Tamper event ──────────────────────────────────────────────── */
         if (g_tamperEvt)
         {
-            uint8_t evt;
-            if (xQueueReceive(g_tamperEvt, &evt, 0) == pdTRUE)
+            uint8_t tevt;
+            if (xQueueReceive(g_tamperEvt, &tevt, 0) == pdTRUE)
             {
                 Display_Both("!! TAMPER !!", "Device moved");
                 Buzzer_Alarm(1500);
-                Display_Idle();
+                bitmask      = 0;
+                session_start = 0;
+                g_session_id++;
+                Display_Both("Scan 2 factors", "");
                 continue;
             }
         }
 
-        /* ── RFID card scan ────────────────────────────────────────── */
-        if (s_rfid_ok)
+        /* ── Session timeout (30 s after first factor received) ────────── */
+        if (bitmask != 0 && (HAL_GetTick() - session_start) > SESSION_TIMEOUT_MS)
         {
-            uint8_t str[MAX_LEN];
-            uint8_t status = MFRC522_Request(PICC_REQIDL, str);
-            if (status != MI_OK) { osDelay(200); continue; }
+            Display_Timed("Session timeout", "Try again", 1500);
+            bitmask      = 0;
+            session_start = 0;
+            g_session_id++;
+            Display_Both("Scan 2 factors", "");
+            continue;
+        }
 
-            status = MFRC522_Anticoll(str);
-            if (status != MI_OK) { osDelay(200); continue; }
+        /* ── Receive a verified factor from sensor tasks ───────────────── */
+        AuthFactor_t factor;
+        if (xQueueReceive(g_authEvt, &factor, pdMS_TO_TICKS(100)) != pdTRUE) continue;
 
-            uint8_t sNum[5];
-            memcpy(sNum, str, 5);
+        if (bitmask == 0) session_start = HAL_GetTick();
+        bitmask |= (uint8_t)factor;
 
-            if (memcmp(sNum, s_creds.uid, 5) != 0)
-            {
-                Buzzer_BeepDenied();
-                Display_Timed("Access Denied!", "Unknown Card", 2000);
-                Display_Idle();
-                continue;
-            }
+        /* popcount >= 2 means at least two different factors received */
+        if ((bitmask & (bitmask - 1u)) != 0u)
+        {
+            Display_Both("Access Granted!", "Welcome!");
+            Buzzer_BeepGranted();
+            Solenoid_Unlock();
+            osDelay(UNLOCK_MS);
+            Solenoid_Lock();
 
-            Buzzer_BeepOK();
-            Display_Timed("Card OK!", "Place finger...", 1000);
+            MFRC522_Init();
+            osDelay(50);
+
+            bitmask      = 0;
+            session_start = 0;
+            g_session_id++;
+            Display_Both("Scan 2 factors", "");
         }
         else
         {
-            /* RFID disabled — go straight to fingerprint */
-            Display_Timed("Place finger...", "", 800);
-        }
-
-        return AUTH_ST_FP;
-    }
-}
-
-static AuthState_t do_fp(void)
-{
-    uint16_t matched_id, score;
-    HAL_StatusTypeDef fp_status = R307_Verify(&matched_id, &score);
-
-    if (fp_status != HAL_OK)
-    {
-        Buzzer_BeepDenied();
-        Display_Timed("Bad Finger!", "Access Denied", 2000);
-        return AUTH_ST_IDLE;
-    }
-
-    Buzzer_BeepOK();
-    Display_Timed("Finger OK!", "Enter Password:", 1000);
-    return AUTH_ST_PWD;
-}
-
-static AuthState_t do_pwd(void)
-{
-    for (int attempt = 1; attempt <= MAX_ATTEMPTS; attempt++)
-    {
-        char msg[17];
-        snprintf(msg, sizeof(msg), "Pass (%d/%d):", attempt, MAX_ATTEMPTS);
-        Display_Line(0, msg);
-        Display_Line(1, "");
-
-        char entered[PASSWORD_LEN + 1];
-        get_password(entered, PASSWORD_LEN);
-
-        if (strcmp(entered, s_creds.password) == 0)
-        {
-            return AUTH_ST_GRANTED;
-        }
-
-        int left = MAX_ATTEMPTS - attempt;
-        char remain[17];
-        if (left > 0) snprintf(remain, sizeof(remain), "%d tries left", left);
-        else          snprintf(remain, sizeof(remain), "Locked out!");
-
-        Buzzer_BeepDenied();
-        Display_Timed("Wrong Password!", remain, 1500);
-    }
-
-    return AUTH_ST_ERROR;
-}
-
-static AuthState_t do_granted(void)
-{
-    Display_Both("Access Granted!", "Welcome!");
-    Buzzer_BeepGranted();
-
-    Solenoid_Unlock();
-    osDelay(UNLOCK_MS);
-    Solenoid_Lock();
-
-    /* Re-init RFID to clear stale IRQ bits from the transaction */
-    MFRC522_Init();
-    osDelay(50);
-
-    return AUTH_ST_IDLE;
-}
-
-static AuthState_t do_error(void)
-{
-    /* Locked out after too many attempts.
-     * Alarm + display, then require a reset button press to retry.
-     * Credentials are kept — no re-enrollment needed.               */
-    Display_Both("Access Denied!", "Too many tries");
-    Buzzer_Alarm(LOCKOUT_ALARM_MS);
-
-    Display_Error("Press reset btn");
-
-    /* Wait for reset button press and release */
-    while (!ResetButton_IsPressed()) osDelay(100);
-    osDelay(50);
-    while (ResetButton_IsPressed()) osDelay(50);
-
-    return AUTH_ST_IDLE;
-}
-
-/* ═══════════════════════════════════════════════════════════════════════════
- *  TASK ENTRY
- * ═══════════════════════════════════════════════════════════════════════════ */
-void AuthTask(void *argument)
-{
-    AuthState_t state = AUTH_ST_INIT;
-
-    for (;;)
-    {
-        switch (state)
-        {
-            case AUTH_ST_INIT:    state = do_init();    break;
-            case AUTH_ST_SETUP:   state = do_setup();   break;
-            case AUTH_ST_IDLE:    state = do_idle();    break;
-            case AUTH_ST_FP:      state = do_fp();      break;
-            case AUTH_ST_PWD:     state = do_pwd();     break;
-            case AUTH_ST_GRANTED: state = do_granted(); break;
-            case AUTH_ST_ERROR:   state = do_error();   break;
-            default:              state = AUTH_ST_INIT; break;
+            Display_Line(0, "1 done, 1 more!");
         }
     }
 }

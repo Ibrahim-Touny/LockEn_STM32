@@ -1,6 +1,7 @@
 #pragma once
 #include "FreeRTOS.h"
 #include "queue.h"
+#include "cmsis_os.h"
 #include <stdint.h>
 
 /* Queue of uint8_t events posted by TamperTask when motion is detected.
@@ -11,4 +12,5 @@ extern QueueHandle_t    g_tamperEvt;
  * before taking its baseline and starting to poll.                      */
 extern volatile uint8_t g_mpu_ok;
 
+extern const osThreadAttr_t tamperTask_attr;
 void TamperTask(void *argument);

@@ -1,8 +1,30 @@
 // r307.c
 #include "r307.h"
+#include "display.h"
 #include "cmsis_os.h"
 #include <string.h>
 #include <stdio.h>
+#include <stdarg.h>
+
+static volatile uint8_t s_r307_ui_log_enabled = 0;
+
+void R307_SetUiLogEnabled(uint8_t enable)
+{
+    s_r307_ui_log_enabled = enable ? 1u : 0u;
+}
+
+void R307_UiLog(const char *fmt, ...)
+{
+    if (!s_r307_ui_log_enabled) return;
+
+    char buf[17];
+    va_list args;
+    va_start(args, fmt);
+    vsnprintf(buf, sizeof(buf), fmt, args);
+    va_end(args);
+
+    Display_Line(1, buf);
+}
 
 // Helper: build command packet into out_buf, return packet length
 // out_buf must be large enough (> 32 bytes recommended)
@@ -272,11 +294,17 @@ static HAL_StatusTypeDef WaitForFingerRemoval(uint32_t timeout_ms)
     {
         uint8_t resp[12];
 
+        memset(resp, 0, sizeof(resp));
+
         // Send capture finger command, do not spam logs
-        R307_SendCommand((uint8_t[]){
+        if (R307_SendCommand((uint8_t[]){
             0xEF,0x01,0xFF,0xFF,0xFF,0xFF,
             0x01,0x00,0x03,0x01,0x00,0x05
-        }, 12, resp, sizeof(resp));
+        }, 12, resp, sizeof(resp)) != HAL_OK)
+        {
+            osDelay(100);
+            continue;
+        }
 
         // resp[9] = confirmation code
         if (resp[9] == 0x02)  // 0x02 = no finger detected
@@ -288,7 +316,7 @@ static HAL_StatusTypeDef WaitForFingerRemoval(uint32_t timeout_ms)
         // Check timeout
         if (HAL_GetTick() - start > timeout_ms)
         {
-            FP_LOG("Timeout: finger not removed in time");
+            FP_LOG("Timeout remove");
             return HAL_TIMEOUT;
         }
 
@@ -309,11 +337,17 @@ static HAL_StatusTypeDef WaitForFingerPlacement(uint32_t timeout_ms)
     {
         uint8_t resp[12];
 
+        memset(resp, 0, sizeof(resp));
+
         // Send capture finger command
-        R307_SendCommand((uint8_t[]){
+        if (R307_SendCommand((uint8_t[]){
             0xEF,0x01,0xFF,0xFF,0xFF,0xFF,
             0x01,0x00,0x03,0x01,0x00,0x05
-        }, 12, resp, sizeof(resp));
+        }, 12, resp, sizeof(resp)) != HAL_OK)
+        {
+            osDelay(100);
+            continue;
+        }
 
         // resp[9] = confirmation code
         if (resp[9] == 0x00)  // 0x00 = finger detected
@@ -325,11 +359,23 @@ static HAL_StatusTypeDef WaitForFingerPlacement(uint32_t timeout_ms)
         // Check timeout
         if (HAL_GetTick() - start > timeout_ms)
         {
-            FP_LOG("Timeout: finger not placed in time");
+            FP_LOG("Timeout place");
             return HAL_TIMEOUT;
         }
 
         osDelay(300);  // Wait before next check
+    }
+}
+
+static HAL_StatusTypeDef R307_CaptureWithTimeout(uint32_t timeout_ms)
+{
+    uint32_t start = HAL_GetTick();
+
+    while (1)
+    {
+        if (R307_CaptureFinger() == HAL_OK) return HAL_OK;
+        if ((HAL_GetTick() - start) > timeout_ms) return HAL_TIMEOUT;
+        osDelay(200);
     }
 }
 
@@ -339,69 +385,71 @@ static HAL_StatusTypeDef WaitForFingerPlacement(uint32_t timeout_ms)
 // Enroll: capture twice -> convert -> generate model -> store
 HAL_StatusTypeDef R307_Enroll(uint16_t page_id)
 {
-    FP_LOG("\r\n=== ENROLL FINGERPRINT ===");
-    FP_LOG("Target ID = %d", page_id);
+    FP_LOG("Enroll FP");
+    FP_LOG("Enroll ID=%d", page_id);
 
     // 1st capture
-    FP_LOG("Place your finger...");
+    FP_LOG("Place finger...");
     if (WaitForFingerPlacement(20000) != HAL_OK) {
     	return HAL_TIMEOUT;
     }
 
-    FP_LOG("Capturing finger...");
-    while (R307_CaptureFinger() != HAL_OK) {
-        osDelay(200); // wait and retry
+    FP_LOG("Capturing...");
+    if (R307_CaptureWithTimeout(5000) != HAL_OK) {
+        FP_LOG("Capture timeout");
+        return HAL_TIMEOUT;
     }
     if (R307_Image2Tz(1) != HAL_OK) {
-        FP_LOG("Failed to convert first image");
+        FP_LOG("Conv 1 failed");
         return HAL_ERROR;
     }
-    FP_LOG("First image captured and converted");
+    FP_LOG("1st img OK");
 
     // Wait until finger is removed (with timeout)
-    FP_LOG("Please remove your finger...");
+    FP_LOG("Remove finger...");
 
     if (WaitForFingerRemoval(10000) != HAL_OK) {
         return HAL_TIMEOUT;
     }
 
     // 2nd capture
-    FP_LOG("Place the same finger again...");
+    FP_LOG("Place again...");
     if (WaitForFingerPlacement(20000) != HAL_OK) {
-    	return HAL_TIMEOUT;
+        return HAL_TIMEOUT;
     }
 
-    FP_LOG("Capturing finger again...");
-    while (R307_CaptureFinger() != HAL_OK) {
-        osDelay(200); // wait and retry
+    FP_LOG("Capturing 2nd...");
+    if (R307_CaptureWithTimeout(5000) != HAL_OK) {
+        FP_LOG("Capture timeout");
+        return HAL_TIMEOUT;
     }
 
     if (R307_Image2Tz(2) != HAL_OK) {
-        FP_LOG("Failed to convert second image");
+        FP_LOG("Conv 2 failed");
         return HAL_ERROR;
     }
-    FP_LOG("Second image captured and converted");
+    FP_LOG("2nd img OK");
 
-    FP_LOG("Please remove your finger...");
+    FP_LOG("Remove finger...");
 
-       if (WaitForFingerRemoval(10000) != HAL_OK) {
-           return HAL_TIMEOUT;
-       }
+    if (WaitForFingerRemoval(10000) != HAL_OK) {
+        return HAL_TIMEOUT;
+    }
 
     // Merge buffers into template
     if (R307_GenerateTemplate() != HAL_OK) {
-        FP_LOG("Failed to generate template (merge)");
+        FP_LOG("Merge failed");
         return HAL_ERROR;
     }
     FP_LOG("Template merged");
 
     // Store model at page_id (store from buffer 1)
     if (R307_StoreTemplate(1, page_id) != HAL_OK) {
-        FP_LOG("Failed to store template");
+        FP_LOG("Store failed");
         return HAL_ERROR;
     }
 
-    FP_LOG("Enroll successful. Stored at ID=%d", page_id);
+    FP_LOG("Stored ID=%d", page_id);
     return HAL_OK;
 }
 
@@ -411,23 +459,24 @@ HAL_StatusTypeDef R307_Verify(uint16_t *out_page_id, uint16_t *out_score)
 {
 	HAL_StatusTypeDef status;
 
-    FP_LOG("\r\n=== VERIFY FINGERPRINT ===");
-    FP_LOG("Place your finger...");
+    FP_LOG("Verify FP");
+    FP_LOG("Place finger...");
     if (WaitForFingerPlacement(20000) != HAL_OK) {
     	return HAL_TIMEOUT;
     }
 
-    FP_LOG("Capturing finger...");
-    while (R307_CaptureFinger() != HAL_OK) {
-        osDelay(200); // wait and retry
+    FP_LOG("Capturing...");
+    if (R307_CaptureWithTimeout(5000) != HAL_OK) {
+        FP_LOG("Capture timeout");
+        return HAL_TIMEOUT;
     }
     if (R307_Image2Tz(1) != HAL_OK) return HAL_ERROR;
 
     // Search entire library; change range if you have different capacity
     uint16_t page_id = 0, score = 0;
-    FP_LOG("Searching Database...");
+    FP_LOG("Searching...");
     if (R307_SearchDatabase(&page_id, &score, 0x0000, 0x03E8) == HAL_OK) {
-        FP_LOG("Match found: ID=%d Score=%d", page_id, score);
+        FP_LOG("Match ID=%d", page_id);
         if (out_page_id) *out_page_id = page_id;
         if (out_score)   *out_score   = score;
         status = HAL_OK;
@@ -436,7 +485,7 @@ HAL_StatusTypeDef R307_Verify(uint16_t *out_page_id, uint16_t *out_score)
     	status = HAL_ERROR;
     }
 
-    FP_LOG("Please remove your finger...");
+    FP_LOG("Remove finger...");
 
 //       if (WaitForFingerRemoval(10000) != HAL_OK) {
 //           status = HAL_TIMEOUT;
@@ -462,7 +511,7 @@ HAL_StatusTypeDef R307_VerifyPassword(uint32_t password)
     if (R307_SendCommand(cmd, cmd_len, resp, sizeof(resp)) == HAL_OK) {
         // resp[6] = packet identifier (0x07 = ACK), resp[9] = confirmation code
         if (resp[9] == 0x00) {
-            FP_LOG("Password verified. Sensor initialized!");
+            FP_LOG("FP sensor OK!");
             return HAL_OK;
         }
         DB_LOG("Verify failed (confirmation=0x%02X)", resp[9]);
@@ -493,7 +542,7 @@ HAL_StatusTypeDef R307_SetPassword(uint32_t new_password)
         // resp[6] = packet identifier (0x07 = ACK)
         // resp[9] = confirmation code (0x00 = success)
         if (resp[6] == 0x07 && resp[9] == 0x00) {
-            FP_LOG("Password set successfully!");
+            FP_LOG("Password set!");
             return HAL_OK;
         }
         DB_LOG("Set password failed (confirmation=0x%02X)", resp[9]);

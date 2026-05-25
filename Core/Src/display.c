@@ -3,6 +3,15 @@
 #include "cmsis_os.h"
 #include <string.h>
 
+osMutexId_t g_lcd_mutex = NULL;
+
+void Display_Init(void)
+{
+    g_lcd_mutex = osMutexNew(NULL);
+    lcd_init();
+    lcd_clear();
+}
+
 static void write_row(uint8_t row, const char *text)
 {
     char buf[17];
@@ -17,31 +26,41 @@ static void write_row(uint8_t row, const char *text)
 
 void Display_Line(uint8_t row, const char *text)
 {
+    if (g_lcd_mutex) osMutexAcquire(g_lcd_mutex, portMAX_DELAY);
     write_row(row, text);
+    if (g_lcd_mutex) osMutexRelease(g_lcd_mutex);
 }
 
 void Display_Both(const char *top, const char *bot)
 {
+    if (g_lcd_mutex) osMutexAcquire(g_lcd_mutex, portMAX_DELAY);
     write_row(0, top);
     write_row(1, bot);
+    if (g_lcd_mutex) osMutexRelease(g_lcd_mutex);
 }
 
 void Display_Timed(const char *top, const char *bot, uint32_t ms)
 {
+    if (g_lcd_mutex) osMutexAcquire(g_lcd_mutex, portMAX_DELAY);
     write_row(0, top);
     write_row(1, bot);
+    if (g_lcd_mutex) osMutexRelease(g_lcd_mutex);
     if (ms > 0) osDelay(ms);
 }
 
 void Display_Idle(void)
 {
+    if (g_lcd_mutex) osMutexAcquire(g_lcd_mutex, portMAX_DELAY);
     lcd_clear();
-    write_row(0, "Scan your card");
+    write_row(0, "Scan 2 factors");
     write_row(1, "");
+    if (g_lcd_mutex) osMutexRelease(g_lcd_mutex);
 }
 
 void Display_Error(const char *msg)
 {
+    if (g_lcd_mutex) osMutexAcquire(g_lcd_mutex, portMAX_DELAY);
     write_row(0, "** ERROR **");
     write_row(1, msg);
+    if (g_lcd_mutex) osMutexRelease(g_lcd_mutex);
 }
