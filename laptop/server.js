@@ -169,16 +169,17 @@ const DASHBOARD_HTML = /* html */`<!DOCTYPE html>
 <title>LockEn Safe</title>
 <style>
 *{box-sizing:border-box;margin:0;padding:0}
-body{font-family:'Segoe UI',sans-serif;background:#1a1a2e;color:#e0e0e0;padding:24px}
-h1{color:#00d4ff;margin-bottom:6px;font-size:1.5rem;letter-spacing:1px}
-.subtitle{color:#555;font-size:.8rem;margin-bottom:20px}
-.status-bar{display:flex;align-items:center;gap:10px;margin-bottom:20px}
+body{font-family:'Segoe UI',sans-serif;background:#1a1a2e;color:#e0e0e0;padding:24px;min-height:100vh;display:flex;flex-direction:column}
+h1{color:#00d4ff;margin-bottom:10px;font-size:3rem;letter-spacing:3px;text-align:center}
+.subtitle{color:#555;font-size:1.2rem;margin-bottom:20px;text-align:center}
+.status-bar{display:flex;align-items:center;justify-content:center;gap:10px;margin-bottom:20px}
+.badge{display:inline-block;padding:6px 20px;border-radius:12px;font-size:1rem;font-weight:bold;transition:all .3s}
 .badge{display:inline-block;padding:4px 12px;border-radius:12px;font-size:.75rem;font-weight:bold;transition:all .3s}
 .badge.online{background:#00b36b22;color:#00b36b;border:1px solid #00b36b}
 .badge.offline{background:#ff444422;color:#ff4444;border:1px solid #ff4444}
-.grid{display:grid;grid-template-columns:340px 1fr;gap:20px;max-width:980px}
+.grid{display:grid;grid-template-columns:340px 1fr;gap:20px;width:100%;flex:1}
 @media(max-width:700px){.grid{grid-template-columns:1fr}}
-.card{background:#16213e;border-radius:10px;padding:20px;border:1px solid #0f3460}
+.card{background:#16213e;border-radius:10px;padding:20px;border:1px solid #0f3460;display:flex;flex-direction:column}
 .card h2{font-size:.8rem;text-transform:uppercase;letter-spacing:1px;color:#666;margin-bottom:14px}
 .lcd{background:#0b1a0b;border:2px solid #00aa00;border-radius:6px;padding:10px 14px;
      font-family:'Courier New',monospace;font-size:1.05rem;color:#00ee00;line-height:2}
