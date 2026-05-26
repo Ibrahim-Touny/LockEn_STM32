@@ -2,6 +2,8 @@
 
 const net       = require('net');
 const http      = require('http');
+const fs        = require('fs');
+const path      = require('path');
 const WebSocket = require('ws');
 
 const TCP_PORT  = 3000;   /* ESP8266 connects here */
@@ -138,6 +140,14 @@ const httpServer = http.createServer((req, res) => {
         res.writeHead(200, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify({ lcd: lcdState, connected: !!tcpSocket }));
 
+    } else if (req.method === 'GET' && req.url === '/logo.png') {
+        const logoPath = path.join(__dirname, 'logo.png');
+        fs.readFile(logoPath, (err, data) => {
+            if (err) { res.writeHead(404); res.end('Not Found'); return; }
+            res.writeHead(200, { 'Content-Type': 'image/png' });
+            res.end(data);
+        });
+
     } else {
         res.writeHead(404);
         res.end('Not Found');
@@ -169,8 +179,8 @@ const DASHBOARD_HTML = /* html */`<!DOCTYPE html>
 <title>LockEn Safe</title>
 <style>
 *{box-sizing:border-box;margin:0;padding:0}
-body{font-family:'Segoe UI',sans-serif;background:#1a1a2e;color:#e0e0e0;padding:24px;min-height:100vh;display:flex;flex-direction:column}
-h1{color:#00d4ff;margin-bottom:10px;font-size:3rem;letter-spacing:3px;text-align:center}
+body{font-family:'Segoe UI',sans-serif;background:#a8d8ea;color:#1a1a2e;padding:24px;min-height:100vh;display:flex;flex-direction:column}
+.logo{max-height:100px;max-width:360px;object-fit:contain;margin-bottom:4px;display:block;margin-left:auto;margin-right:auto}
 .subtitle{color:#555;font-size:1.2rem;margin-bottom:20px;text-align:center}
 .status-bar{display:flex;align-items:center;justify-content:center;gap:10px;margin-bottom:20px}
 .badge{display:inline-block;padding:6px 20px;border-radius:12px;font-size:1rem;font-weight:bold;transition:all .3s}
@@ -208,7 +218,7 @@ tbody td{padding:6px 8px;border-bottom:1px solid #0f346033}
 </style>
 </head>
 <body>
-<h1>LockEn Safe</h1>
+<img src="/logo.png" alt="LockEn Safe" class="logo">
 <p class="subtitle">Remote dashboard</p>
 <div class="status-bar">
   <span class="badge offline" id="conn-badge">Disconnected</span>
