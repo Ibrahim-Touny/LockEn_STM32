@@ -22,6 +22,11 @@ static void write_row(uint8_t row, const char *text)
     memcpy(buf, text, len);
     lcd_put_cur(row, 0);
     lcd_send_string(buf);
+
+    /* Mirror to EspTask so it can push LCD state to the laptop */
+    if (row == 0) memcpy((char *)g_lcd_line0, buf, 17);
+    else           memcpy((char *)g_lcd_line1, buf, 17);
+    g_lcd_dirty = 1;
 }
 
 void Display_Line(uint8_t row, const char *text)

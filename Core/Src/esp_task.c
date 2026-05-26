@@ -1,0 +1,244 @@
+#include "esp_task.h"
+#include "auth_task.h"
+#include "display.h"
+#include "ESP8266.h"
+#include "periph_init.h"
+#include "FreeRTOS.h"
+#include "queue.h"
+#include "cmsis_os.h"
+#include <string.h>
+#include <stdio.h>
+
+#define LAPTOP_IP    "192.168.4.2"
+#define LAPTOP_PORT  3000
+#define AP_SSID      "LockEn_Safe"
+#define AP_PASS      "locken123"
+#define AP_CHANNEL   6
+#define PWD_CMP_LEN  5   /* PASSWORD_LEN (4) + null terminator */
+
+const osThreadAttr_t espTask_attr = {
+    .name       = "EspTask",
+    .stack_size = 1024,
+    .priority   = (osPriority_t) osPriorityBelowNormal,
+};
+
+QueueHandle_t g_esp_log_queue = NULL;
+
+volatile char    g_lcd_line0[17] = "                ";
+volatile char    g_lcd_line1[17] = "                ";
+volatile uint8_t g_lcd_dirty     = 0;
+
+static uint8_t s_connected = 0;
+
+/* ── Send a JSON line to laptop via AT+CIPSEND, yields via osDelay ── */
+static uint8_t esp_send_json(const char *json)
+{
+    if (!s_connected) return 0;
+
+    uint16_t len = (uint16_t)strlen(json);
+    char cmd[32];
+    snprintf(cmd, sizeof(cmd), "AT+CIPSEND=%d\r\n", len);
+
+    Wifi_RxClear();
+    HAL_UART_Transmit(&huart2, (uint8_t *)cmd, (uint16_t)strlen(cmd), 1000);
+
+    for (uint16_t i = 0; i < 200; i++) {
+        if (strstr((char *)Wifi.RxBuffer, ">")) break;
+        osDelay(10);
+        if (i == 199) { s_connected = 0; return 0; }
+    }
+
+    HAL_UART_Transmit(&huart2, (uint8_t *)json, len, 1000);
+    osDelay(150);
+    return 1;
+}
+
+/* ── Attempt TCP client connection to laptop, yields via osDelay ── */
+static uint8_t esp_try_connect(void)
+{
+    char cmd[64];
+    snprintf(cmd, sizeof(cmd),
+             "AT+CIPSTART=\"TCP\",\"%s\",%d,10\r\n", LAPTOP_IP, LAPTOP_PORT);
+
+    Wifi_RxClear();
+    HAL_UART_Transmit(&huart2, (uint8_t *)cmd, (uint16_t)strlen(cmd), 1000);
+
+    for (uint8_t i = 0; i < 80; i++) {
+        char *rx = (char *)Wifi.RxBuffer;
+        if (strstr(rx, "CONNECT") || strstr(rx, "\r\nOK\r\n")) return 1;
+        if (strstr(rx, "ERROR")   || strstr(rx, "FAIL"))     return 0;
+        osDelay(100);
+    }
+    return 0;
+}
+
+/* ── Parse +IPD data arriving from laptop, validate and respond ── */
+static void esp_check_incoming(void)
+{
+    char *rx = (char *)Wifi.RxBuffer;
+
+    if (strstr(rx, "CLOSED")) {
+        s_connected = 0;
+        Wifi_RxClear();
+        return;
+    }
+
+    char *ipd = strstr(rx, "+IPD,");
+    if (!ipd) return;
+
+    char *colon = strchr(ipd, ':');
+    if (!colon) return;
+
+    char *payload = colon + 1;
+
+    if (!strstr(payload, "\"t\":\"pwd\"")) {
+        while (ipd <= colon) *ipd++ = ' ';
+        return;
+    }
+
+    char *pin_start = strstr(payload, "\"pin\":\"");
+    if (!pin_start) { while (ipd <= colon) *ipd++ = ' '; return; }
+    pin_start += 7; /* skip past "pin":" */
+
+    char *pin_end = strchr(pin_start, '"');
+    if (!pin_end) { while (ipd <= colon) *ipd++ = ' '; return; }
+
+    uint8_t pin_len = (uint8_t)(pin_end - pin_start);
+    if (pin_len > 8) pin_len = 8;
+
+    char pin[9] = {0};
+    memcpy(pin, pin_start, pin_len);
+
+    /* Mark region consumed */
+    char *mark = ipd;
+    while (mark <= pin_end) *mark++ = ' ';
+
+    uint8_t ok = g_creds_ready &&
+                 (strncmp(pin, g_creds.password, PWD_CMP_LEN) == 0);
+
+    char result[48];
+    snprintf(result, sizeof(result),
+             "{\"t\":\"pwd_result\",\"ok\":%s}\n", ok ? "true" : "false");
+    esp_send_json(result);
+
+    if (ok) {
+        AuthFactor_t f = FACTOR_PWD;
+        xQueueSend(g_authEvt, &f, 0);
+    }
+}
+
+/* ── Send raw AT command, poll for expected response using osDelay ── */
+static uint8_t esp_at_cmd(const char *cmd, const char *expect, uint32_t timeout_ms)
+{
+    Wifi_RxClear();
+    HAL_UART_Transmit(&huart2, (uint8_t *)cmd, (uint16_t)strlen(cmd), 1000);
+    for (uint32_t t = 0; t < timeout_ms; t += 100) {
+        if (strstr((char *)Wifi.RxBuffer, expect)) return 1;
+        osDelay(100);
+    }
+    return 0;
+}
+
+/* ── Task entry ── */
+void EspTask(void *argument)
+{
+    g_esp_log_queue = xQueueCreate(8, sizeof(EspLogEntry_t));
+
+    /* Let auth/setup complete before claiming WiFi hardware */
+    while (!g_creds_ready) osDelay(100);
+
+    /* ── Step 1: power and handshake ── */
+    Display_Line(1, "WiFi: starting..");
+    Wifi_Enable();   /* pulls RST/EN lines, then waits 2 s */
+
+    /* Retry AT handshake up to 10 times — module can be slow */
+    uint8_t module_ok = 0;
+    for (uint8_t i = 0; i < 10; i++) {
+        if (esp_at_cmd("AT\r\n", "OK", 1500)) { module_ok = 1; break; }
+        osDelay(500);
+    }
+    if (!module_ok) {
+        Display_Line(1, "WiFi: no module!");
+        for (;;) osDelay(2000);
+    }
+
+    /* ── Step 2: set SoftAP mode and save to flash ── */
+    Display_Line(1, "WiFi: set AP...");
+    esp_at_cmd("AT+CWMODE_DEF=2\r\n", "OK", 3000);
+
+    /* ── Step 3: restart so mode takes effect from flash ── */
+    Display_Line(1, "WiFi: restarting");
+    esp_at_cmd("AT+RST\r\n", "OK", 2000);
+    osDelay(3000);   /* wait for module to fully reboot */
+
+    /* Re-handshake after restart */
+    for (uint8_t i = 0; i < 10; i++) {
+        if (esp_at_cmd("AT\r\n", "OK", 1500)) break;
+        osDelay(500);
+    }
+
+    /* ── Step 4: configure the AP (saved to flash) ── */
+    Display_Line(1, "WiFi: config AP.");
+    /* AT+CWSAP_DEF="SSID","pass",channel,enc,maxconn,hidden */
+    char ap_cmd[80];
+    snprintf(ap_cmd, sizeof(ap_cmd),
+             "AT+CWSAP_DEF=\"" AP_SSID "\",\"" AP_PASS "\",%d,3,4,0\r\n",
+             AP_CHANNEL);
+    if (!esp_at_cmd(ap_cmd, "OK", 5000)) {
+        Display_Line(1, "WiFi: AP cfg fail");
+        /* non-fatal — AP may already be configured from last boot */
+    }
+
+    Display_Line(1, "WiFi: AP Ready! ");
+    osDelay(1500);
+    Display_Line(1, "");
+
+    /* ── Step 5: TCP client to laptop ── */
+    Wifi_TcpIp_SetMultiConnection(false);
+    s_connected = esp_try_connect();
+
+    uint32_t reconnect_ts = 0;
+
+    for (;;)
+    {
+        if (!s_connected) {
+            if (HAL_GetTick() - reconnect_ts > 10000u) {
+                reconnect_ts = HAL_GetTick();
+                Wifi_TcpIp_SetMultiConnection(false);
+                s_connected = esp_try_connect();
+            }
+            osDelay(500);
+            continue;
+        }
+
+        /* Push LCD state whenever display.c sets g_lcd_dirty */
+        if (g_lcd_dirty) {
+            g_lcd_dirty = 0;
+            char l0[17], l1[17];
+            osMutexAcquire(g_lcd_mutex, portMAX_DELAY);
+            memcpy(l0, (char *)g_lcd_line0, 17);
+            memcpy(l1, (char *)g_lcd_line1, 17);
+            osMutexRelease(g_lcd_mutex);
+
+            char json[88];
+            snprintf(json, sizeof(json),
+                     "{\"t\":\"lcd\",\"l0\":\"%s\",\"l1\":\"%s\"}\n", l0, l1);
+            esp_send_json(json);
+        }
+
+        /* Drain access log entries posted by AuthTask */
+        EspLogEntry_t entry;
+        while (xQueueReceive(g_esp_log_queue, &entry, 0) == pdTRUE) {
+            char json[88];
+            snprintf(json, sizeof(json),
+                     "{\"t\":\"log\",\"ts\":%lu,\"ev\":\"%s\",\"fx\":\"%s\"}\n",
+                     (unsigned long)entry.ts, entry.event, entry.factors);
+            esp_send_json(json);
+        }
+
+        /* Check for PIN or disconnect notifications from laptop */
+        esp_check_incoming();
+
+        osDelay(100);
+    }
+}

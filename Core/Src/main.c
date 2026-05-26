@@ -16,6 +16,8 @@
 #include "rfid_task.h"
 #include "fp_task.h"
 #include "pwd_task.h"
+#include "esp_task.h"
+#include "dwt_stm32_delay.h"
 
 /* ════════════════════════════════════════════════════════════════════════════
  *  MAIN
@@ -23,6 +25,7 @@
 int main(void)
 {
     HAL_Init();
+    DWT_Delay_Init();
     SystemClock_Config();
     MX_GPIO_Init();
     MX_I2C1_Init();
@@ -40,6 +43,7 @@ int main(void)
     osThreadNew(RfidTask,   NULL, &rfidTask_attr);
     osThreadNew(FpTask,     NULL, &fpTask_attr);
     osThreadNew(PwdTask,    NULL, &pwdTask_attr);
+    osThreadNew(EspTask,    NULL, &espTask_attr);
 
     osKernelStart();
 

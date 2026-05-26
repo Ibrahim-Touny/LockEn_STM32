@@ -1,6 +1,7 @@
 #pragma once
 #include <stdint.h>
 #include "cmsis_os.h"
+#include "esp_task.h"
 
 /* Created by Display_Init(); used by PwdTask for direct LCD character echo */
 extern osMutexId_t g_lcd_mutex;

@@ -10,6 +10,7 @@
 #include "mpu6050.h"
 #include "i2c-lcd.h"
 #include "periph_init.h"
+#include "esp_task.h"
 #include "FreeRTOS.h"
 #include "queue.h"
 #include "cmsis_os.h"
@@ -42,6 +43,29 @@ CredentialStore_t g_creds;
 
 /* ── Module state ───────────────────────────────────────────────────────── */
 static uint8_t s_rfid_ok = 0;
+
+/* ════════════════════════════════════════════════════════════════════════════
+ *  ESP LOG HELPER
+ * ════════════════════════════════════════════════════════════════════════════ */
+static void esp_log(const char *event, uint8_t fx_mask)
+{
+    if (!g_esp_log_queue) return;
+    EspLogEntry_t entry;
+    entry.ts = HAL_GetTick();
+    strncpy(entry.event, event, sizeof(entry.event) - 1);
+    entry.event[sizeof(entry.event) - 1] = '\0';
+
+    char fx[12] = {0};
+    if (fx_mask & FACTOR_RFID) strncat(fx, "RFID+", sizeof(fx) - strlen(fx) - 1);
+    if (fx_mask & FACTOR_FP)   strncat(fx, "FP+",   sizeof(fx) - strlen(fx) - 1);
+    if (fx_mask & FACTOR_PWD)  strncat(fx, "PWD+",  sizeof(fx) - strlen(fx) - 1);
+    uint8_t fxlen = (uint8_t)strlen(fx);
+    if (fxlen > 0) fx[fxlen - 1] = '\0'; /* strip trailing '+' */
+    strncpy(entry.factors, fx, sizeof(entry.factors) - 1);
+    entry.factors[sizeof(entry.factors) - 1] = '\0';
+
+    xQueueSend(g_esp_log_queue, &entry, 0);
+}
 
 /* ════════════════════════════════════════════════════════════════════════════
  *  HARDWARE HELPERS
@@ -347,6 +371,7 @@ void AuthTask(void *argument)
             {
                 Display_Both("!! TAMPER !!", "Device moved");
                 Buzzer_Alarm(1500);
+                esp_log("TAMPER", 0);
                 bitmask      = 0;
                 session_start = 0;
                 g_session_id++;
@@ -359,6 +384,7 @@ void AuthTask(void *argument)
         if (bitmask != 0 && (HAL_GetTick() - session_start) > SESSION_TIMEOUT_MS)
         {
             Display_Timed("Session timeout", "Try again", 1500);
+            esp_log("TIMEOUT", bitmask);
             bitmask      = 0;
             session_start = 0;
             g_session_id++;
@@ -378,6 +404,7 @@ void AuthTask(void *argument)
         {
             Display_Both("Access Granted!", "Welcome!");
             Buzzer_BeepGranted();
+            esp_log("GRANTED", bitmask);
             Solenoid_Unlock();
             osDelay(UNLOCK_MS);
             Solenoid_Lock();
