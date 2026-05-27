@@ -10,6 +10,7 @@ typedef enum {
     FACTOR_RFID = (1u << 0),
     FACTOR_FP   = (1u << 1),
     FACTOR_PWD  = (1u << 2),
+    FACTOR_FACE = (1u << 3),
 } AuthFactor_t;
 
 /* Sensor tasks post AuthFactor_t values here on success */

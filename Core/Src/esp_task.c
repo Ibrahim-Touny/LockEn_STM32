@@ -28,7 +28,13 @@ volatile char    g_lcd_line0[17] = "                ";
 volatile char    g_lcd_line1[17] = "                ";
 volatile uint8_t g_lcd_dirty     = 0;
 
-static uint8_t s_connected = 0;
+volatile uint8_t g_face_enroll_requested = 0;
+volatile uint8_t g_face_enrolled         = 0;
+
+static uint8_t          s_connected     = 0;
+static volatile uint8_t s_face_scan_req = 0;
+
+void EspTask_RequestFaceScan(void) { s_face_scan_req = 1; }
 
 /* ── Send a JSON line to laptop via AT+CIPSEND, yields via osDelay ── */
 static uint8_t esp_send_json(const char *json)
@@ -72,7 +78,7 @@ static uint8_t esp_try_connect(void)
     return 0;
 }
 
-/* ── Parse +IPD data arriving from laptop, validate and respond ── */
+/* ── Parse +IPD data arriving from laptop ── */
 static void esp_check_incoming(void)
 {
     char *rx = (char *)Wifi.RxBuffer;
@@ -91,17 +97,39 @@ static void esp_check_incoming(void)
 
     char *payload = colon + 1;
 
+    /* enroll_done — server confirms face was stored */
+    if (strstr(payload, "\"t\":\"enroll_done\"")) {
+        g_face_enrolled = 1;
+        char *mark = ipd;
+        while (*mark && *mark != '\n') *mark++ = ' ';
+        return;
+    }
+
+    /* face_ok — server matched the enrolled face */
+    if (strstr(payload, "\"t\":\"face_ok\"")) {
+        if (g_authEvt) {
+            AuthFactor_t f = FACTOR_FACE;
+            xQueueSend(g_authEvt, &f, 0);
+        }
+        Display_Line(0, "Face: OK!");
+        char *mark = ipd;
+        while (*mark && *mark != '\n') *mark++ = ' ';
+        return;
+    }
+
+    /* pwd — remote PIN entry from browser */
     if (!strstr(payload, "\"t\":\"pwd\"")) {
-        while (ipd <= colon) *ipd++ = ' ';
+        char *mark = ipd;
+        while (mark <= colon) *mark++ = ' ';
         return;
     }
 
     char *pin_start = strstr(payload, "\"pin\":\"");
-    if (!pin_start) { while (ipd <= colon) *ipd++ = ' '; return; }
-    pin_start += 7; /* skip past "pin":" */
+    if (!pin_start) { char *mark = ipd; while (mark <= colon) *mark++ = ' '; return; }
+    pin_start += 7;
 
     char *pin_end = strchr(pin_start, '"');
-    if (!pin_end) { while (ipd <= colon) *ipd++ = ' '; return; }
+    if (!pin_end) { char *mark = ipd; while (mark <= colon) *mark++ = ' '; return; }
 
     uint8_t pin_len = (uint8_t)(pin_end - pin_start);
     if (pin_len > 8) pin_len = 8;
@@ -109,7 +137,6 @@ static void esp_check_incoming(void)
     char pin[9] = {0};
     memcpy(pin, pin_start, pin_len);
 
-    /* Mark region consumed */
     char *mark = ipd;
     while (mark <= pin_end) *mark++ = ' ';
 
@@ -144,14 +171,13 @@ void EspTask(void *argument)
 {
     g_esp_log_queue = xQueueCreate(8, sizeof(EspLogEntry_t));
 
-    /* Let auth/setup complete before claiming WiFi hardware */
-    while (!g_creds_ready) osDelay(100);
+    /* WiFi starts immediately (no longer waits for g_creds_ready) so that
+     * face enrollment during do_setup() can complete over the network.    */
 
     /* ── Step 1: power and handshake ── */
     Display_Line(1, "WiFi: starting..");
     Wifi_Enable();   /* pulls RST/EN lines, then waits 2 s */
 
-    /* Retry AT handshake up to 10 times — module can be slow */
     uint8_t module_ok = 0;
     for (uint8_t i = 0; i < 10; i++) {
         if (esp_at_cmd("AT\r\n", "OK", 1500)) { module_ok = 1; break; }
@@ -169,9 +195,8 @@ void EspTask(void *argument)
     /* ── Step 3: restart so mode takes effect from flash ── */
     Display_Line(1, "WiFi: restarting");
     esp_at_cmd("AT+RST\r\n", "OK", 2000);
-    osDelay(3000);   /* wait for module to fully reboot */
+    osDelay(3000);
 
-    /* Re-handshake after restart */
     for (uint8_t i = 0; i < 10; i++) {
         if (esp_at_cmd("AT\r\n", "OK", 1500)) break;
         osDelay(500);
@@ -179,14 +204,12 @@ void EspTask(void *argument)
 
     /* ── Step 4: configure the AP (saved to flash) ── */
     Display_Line(1, "WiFi: config AP.");
-    /* AT+CWSAP_DEF="SSID","pass",channel,enc,maxconn,hidden */
     char ap_cmd[80];
     snprintf(ap_cmd, sizeof(ap_cmd),
              "AT+CWSAP_DEF=\"" AP_SSID "\",\"" AP_PASS "\",%d,3,4,0\r\n",
              AP_CHANNEL);
     if (!esp_at_cmd(ap_cmd, "OK", 5000)) {
-        Display_Line(1, "WiFi: AP cfg fail");
-        /* non-fatal — AP may already be configured from last boot */
+        Display_Line(1, "WiFi: config fail");
     }
 
     Display_Line(1, "WiFi: AP Ready! ");
@@ -209,6 +232,18 @@ void EspTask(void *argument)
             }
             osDelay(500);
             continue;
+        }
+
+        /* Enrollment trigger — sent once per setup/reset cycle */
+        if (g_face_enroll_requested) {
+            g_face_enroll_requested = 0;
+            esp_send_json("{\"t\":\"enroll_reset\"}\n");
+        }
+
+        /* Face scan trigger — sent when user presses 'D' */
+        if (s_face_scan_req) {
+            s_face_scan_req = 0;
+            esp_send_json("{\"t\":\"face_scan\"}\n");
         }
 
         /* Push LCD state whenever display.c sets g_lcd_dirty */
@@ -236,7 +271,7 @@ void EspTask(void *argument)
             esp_send_json(json);
         }
 
-        /* Check for PIN or disconnect notifications from laptop */
+        /* Check for incoming messages from laptop */
         esp_check_incoming();
 
         osDelay(100);

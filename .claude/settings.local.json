@@ -10,7 +10,9 @@
       "Bash(Get-ChildItem -Path \"C:\\\\Users\\\\Ibrahim.ElTouny\\\\Documents\\\\Projects\\\\LockEn_STM32\" -Recurse -Force)",
       "Bash(Select-Object FullName, PSIsContainer)",
       "Bash(Sort-Object FullName)",
-      "Bash(ConvertTo-Json -Depth 100)"
+      "Bash(ConvertTo-Json -Depth 100)",
+      "PowerShell(Get-NetTCPConnection -LocalPort 3000 -State Listen -ErrorAction SilentlyContinue | Select-Object -ExpandProperty OwningProcess | ForEach-Object { Get-Process -Id $_ })",
+      "PowerShell(Stop-Process -Id 24816 -Force)"
     ]
   }
 }

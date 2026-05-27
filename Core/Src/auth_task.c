@@ -59,6 +59,7 @@ static void esp_log(const char *event, uint8_t fx_mask)
     if (fx_mask & FACTOR_RFID) strncat(fx, "RFID+", sizeof(fx) - strlen(fx) - 1);
     if (fx_mask & FACTOR_FP)   strncat(fx, "FP+",   sizeof(fx) - strlen(fx) - 1);
     if (fx_mask & FACTOR_PWD)  strncat(fx, "PWD+",  sizeof(fx) - strlen(fx) - 1);
+    if (fx_mask & FACTOR_FACE) strncat(fx, "CAM+",  sizeof(fx) - strlen(fx) - 1);
     uint8_t fxlen = (uint8_t)strlen(fx);
     if (fxlen > 0) fx[fxlen - 1] = '\0'; /* strip trailing '+' */
     strncpy(entry.factors, fx, sizeof(entry.factors) - 1);
@@ -184,6 +185,17 @@ static void setup_register_password(void)
     Display_Timed("Password Saved!", "", 1500);
 }
 
+static void setup_enroll_face(void)
+{
+    g_face_enrolled          = 0;
+    g_face_enroll_requested  = 1;
+    Display_Line(0, "Look at camera");
+    Display_Line(1, "");
+    while (!g_face_enrolled) osDelay(200);
+    Buzzer_BeepOK();
+    Display_Timed("Face enrolled!", "", 1500);
+}
+
 /* ════════════════════════════════════════════════════════════════════════════
  *  INIT
  * ════════════════════════════════════════════════════════════════════════════ */
@@ -291,6 +303,8 @@ static void do_setup(void)
 
     MFRC522_Init();
     osDelay(100);
+
+    setup_enroll_face();
 
     Display_Timed("Setup Done!", "Scan 2 factors", 2000);
 }

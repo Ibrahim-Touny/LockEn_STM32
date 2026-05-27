@@ -18,5 +18,12 @@ extern volatile char    g_lcd_line0[17];
 extern volatile char    g_lcd_line1[17];
 extern volatile uint8_t g_lcd_dirty;
 
+/* Set by AuthTask during setup/reset — EspTask sends enroll_reset to server */
+extern volatile uint8_t g_face_enroll_requested;
+/* Set by EspTask when server confirms enrollment is done */
+extern volatile uint8_t g_face_enrolled;
+
 extern const osThreadAttr_t espTask_attr;
 void EspTask(void *argument);
+/* Called by PwdTask when 'D' is pressed — opens a 15-second face scan window */
+void EspTask_RequestFaceScan(void);

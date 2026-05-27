@@ -5,16 +5,62 @@ const http      = require('http');
 const fs        = require('fs');
 const path      = require('path');
 const WebSocket = require('ws');
+const { spawn } = require('child_process');
 
 const TCP_PORT  = 3000;   /* ESP8266 connects here */
 const HTTP_PORT = 8080;   /* browser connects here  */
 const MAX_LOG   = 50;
+const PYTHON_EXE = fs.existsSync(path.join(__dirname, '..', '.venv', 'Scripts', 'python.exe'))
+    ? path.join(__dirname, '..', '.venv', 'Scripts', 'python.exe')
+    : 'python';
 
 let lcdState = { l0: '---', l1: '' };
 let accessLog = [];
 let tcpSocket  = null;
 let wss        = null;
 let pendingPwdCallback = null;
+let enrolling = false;
+let scanning  = false;
+let scanTimer = null;
+
+/* ── Python face-recognition child process ── */
+let pyProc      = null;
+let pyBusy      = false;
+let pyCallbacks = [];
+
+function spawnPython() {
+    pyProc = spawn(PYTHON_EXE, [path.join(__dirname, 'face_recog.py')]);
+    let pyBuf = '';
+    pyProc.stdout.on('data', chunk => {
+        pyBuf += chunk.toString();
+        const lines = pyBuf.split('\n');
+        pyBuf = lines.pop();
+        lines.forEach(line => {
+            line = line.trim();
+            if (!line) return;
+            try {
+                const msg = JSON.parse(line);
+                const cb  = pyCallbacks.shift();
+                if (cb) { pyBusy = false; cb(msg); }
+            } catch (_) {}
+        });
+    });
+    pyProc.stderr.on('data', d => console.error('[Python]', d.toString().trim()));
+    pyProc.on('close', () => {
+        console.log('[Python] Process exited — restarting in 2 s');
+        pyProc = null;
+        setTimeout(spawnPython, 2000);
+    });
+}
+
+function pyRequest(obj, callback) {
+    if (!pyProc || pyBusy) { callback({ result: 'busy' }); return; }
+    pyBusy = true;
+    pyCallbacks.push(callback);
+    pyProc.stdin.write(JSON.stringify(obj) + '\n');
+}
+
+spawnPython();
 
 /* ══════════════════════════════════════════════════════════════════════
  *  TCP server — one persistent connection from the ESP8266
@@ -73,6 +119,28 @@ function handleSafeMessage(msg) {
             if (pendingPwdCallback) {
                 pendingPwdCallback(msg.ok === true);
                 pendingPwdCallback = null;
+            }
+            break;
+
+        case 'enroll_reset':
+            enrolling = true;
+            scanning  = false;
+            if (scanTimer) { clearTimeout(scanTimer); scanTimer = null; }
+            broadcast({ type: 'face_status', status: 'enrolling' });
+            pyRequest({ cmd: 'reset' }, () => {});
+            console.log('[Face] Enrollment started');
+            break;
+
+        case 'face_scan':
+            if (!enrolling) {
+                scanning = true;
+                if (scanTimer) clearTimeout(scanTimer);
+                scanTimer = setTimeout(() => {
+                    scanning = false;
+                    broadcast({ type: 'face_status', status: 'idle' });
+                }, 15000);
+                broadcast({ type: 'face_status', status: 'scanning' });
+                console.log('[Face] Scan window open (15 s)');
             }
             break;
     }
@@ -146,6 +214,34 @@ const httpServer = http.createServer((req, res) => {
             if (err) { res.writeHead(404); res.end('Not Found'); return; }
             res.writeHead(200, { 'Content-Type': 'image/png' });
             res.end(data);
+        });
+
+    } else if (req.method === 'POST' && req.url === '/api/face/frame') {
+        const chunks = [];
+        req.on('data', d => chunks.push(d));
+        req.on('end', () => {
+            res.writeHead(200);
+            res.end('ok');
+
+            if (!enrolling && !scanning) return; /* discard when idle */
+
+            const imageB64 = Buffer.concat(chunks).toString('base64');
+            const cmd = enrolling ? 'enroll' : 'recognize';
+
+            pyRequest({ cmd, image: imageB64 }, result => {
+                if (cmd === 'enroll' && result.result === 'enrolled') {
+                    enrolling = false;
+                    sendToSafe({ t: 'enroll_done' });
+                    broadcast({ type: 'face_status', status: 'enrolled' });
+                    console.log('[Face] Enrollment complete');
+                } else if (cmd === 'recognize' && result.result === 'match') {
+                    scanning = false;
+                    if (scanTimer) { clearTimeout(scanTimer); scanTimer = null; }
+                    sendToSafe({ t: 'face_ok' });
+                    broadcast({ type: 'face_status', status: 'matched' });
+                    console.log('[Face] Match — factor posted to safe');
+                }
+            });
         });
 
     } else {

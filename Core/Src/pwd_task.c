@@ -1,5 +1,6 @@
 #include "pwd_task.h"
 #include "auth_task.h"
+#include "esp_task.h"
 #include "display.h"
 #include "buzzer.h"
 #include "keypad.h"
@@ -29,6 +30,14 @@ static uint8_t wait_for_first_key(uint32_t expected_session, char *out_key)
         if (key == 0) { osDelay(20); continue; }
 
         if (key == '#' || key == '*') { osDelay(20); continue; }
+
+        if (key == 'D') {
+            EspTask_RequestFaceScan();
+            Display_Line(0, "Scanning Cam..");
+            Display_Line(1, "");
+            osDelay(20);
+            continue;
+        }
 
         *out_key = key;
         return 1;
@@ -82,6 +91,10 @@ static uint8_t read_password(char *out, uint8_t max_len,
                 lcd_put_cur(1, idx);
                 osMutexRelease(g_lcd_mutex);
             }
+        }
+        else if (key == 'D')
+        {
+            /* ignore D during password entry — face scan already triggered */
         }
         else if (idx < max_len)
         {
