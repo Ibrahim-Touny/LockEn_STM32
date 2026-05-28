@@ -5,6 +5,7 @@
 #include "cmsis_os.h"
 #include <stdint.h>
 
+
 /* Which factor was verified — used as queue payload and bitmask bits */
 typedef enum {
     FACTOR_RFID = (1u << 0),
