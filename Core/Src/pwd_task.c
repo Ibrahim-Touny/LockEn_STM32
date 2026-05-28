@@ -1,6 +1,7 @@
 #include "pwd_task.h"
 #include "auth_task.h"
 #include "esp_task.h"
+#include "fp_task.h"
 #include "display.h"
 #include "buzzer.h"
 #include "keypad.h"
@@ -16,7 +17,7 @@
 
 const osThreadAttr_t pwdTask_attr = {
     .name       = "PwdTask",
-    .stack_size = 512,
+    .stack_size = 1024,
     .priority   = (osPriority_t) osPriorityNormal,
 };
 
@@ -32,12 +33,27 @@ static uint8_t wait_for_first_key(uint32_t expected_session, char *out_key)
         if (key == '#' || key == '*') { osDelay(20); continue; }
 
         if (key == 'D') {
-            EspTask_RequestFaceScan();
-            Display_Line(0, "Scanning Cam..");
+            if (EspTask_IsConnected()) {
+                EspTask_RequestFaceScan();
+                Display_Line(0, "Scanning Cam..");
+            } else {
+                Display_Line(0, "No WiFi!");
+            }
             Display_Line(1, "");
             osDelay(20);
             continue;
         }
+
+        if (key == 'C') {
+            g_fp_scan_requested = 1;
+            Display_Line(0, "Place Finger..");
+            Display_Line(1, "");
+            osDelay(20);
+            continue;
+        }
+
+        /* A and B are not valid first-key inputs */
+        if (key == 'A' || key == 'B') { osDelay(20); continue; }
 
         *out_key = key;
         return 1;
@@ -92,9 +108,9 @@ static uint8_t read_password(char *out, uint8_t max_len,
                 osMutexRelease(g_lcd_mutex);
             }
         }
-        else if (key == 'D')
+        else if (key == 'A' || key == 'B' || key == 'C' || key == 'D')
         {
-            /* ignore D during password entry — face scan already triggered */
+            /* ignore function keys during password entry */
         }
         else if (idx < max_len)
         {

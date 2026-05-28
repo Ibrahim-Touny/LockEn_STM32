@@ -3,6 +3,7 @@
 #include "display.h"
 #include "buzzer.h"
 #include "rc522.h"
+#include "esp_task.h"
 #include "FreeRTOS.h"
 #include "queue.h"
 #include "cmsis_os.h"
@@ -10,7 +11,7 @@
 
 const osThreadAttr_t rfidTask_attr = {
     .name       = "RfidTask",
-    .stack_size = 512,
+    .stack_size = 1024,
     .priority   = (osPriority_t) osPriorityNormal,
 };
 
@@ -33,12 +34,24 @@ void RfidTask(void *argument)
 
         if (memcmp(str, g_creds.uid, 5) != 0)
         {
-            /* Wrong card — rate limit beeps to avoid spam */
+            /* Wrong card — rate limit beeps + display to avoid spam */
             uint32_t now = HAL_GetTick();
             if ((now - last_unknown_tick) > 1500U)
             {
                 last_unknown_tick = now;
                 Buzzer_BeepDenied();
+                Display_Both("Wrong Card!", "Access Denied");
+
+                if (g_esp_log_queue)
+                {
+                    EspLogEntry_t entry;
+                    entry.ts = HAL_GetTick();
+                    strncpy(entry.event,   "WRONG_RFID", sizeof(entry.event)   - 1);
+                    entry.event[sizeof(entry.event) - 1] = '\0';
+                    strncpy(entry.factors, "RFID",       sizeof(entry.factors) - 1);
+                    entry.factors[sizeof(entry.factors) - 1] = '\0';
+                    xQueueSend(g_esp_log_queue, &entry, 0);
+                }
             }
             osDelay(200);
             continue;

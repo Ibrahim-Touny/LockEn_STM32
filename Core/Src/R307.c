@@ -393,12 +393,9 @@ HAL_StatusTypeDef R307_Enroll(uint16_t page_id)
     if (WaitForFingerPlacement(20000) != HAL_OK) {
     	return HAL_TIMEOUT;
     }
-
-    FP_LOG("Capturing...");
-    if (R307_CaptureWithTimeout(5000) != HAL_OK) {
-        FP_LOG("Capture timeout");
-        return HAL_TIMEOUT;
-    }
+    /* WaitForFingerPlacement already ran GenImg and got 0x00 (image captured).
+     * Sending GenImg again here would race against the user lifting their
+     * finger and cause ~90% failure rate. Go directly to Image2Tz. */
     if (R307_Image2Tz(1) != HAL_OK) {
         FP_LOG("Conv 1 failed");
         return HAL_ERROR;
@@ -417,13 +414,7 @@ HAL_StatusTypeDef R307_Enroll(uint16_t page_id)
     if (WaitForFingerPlacement(20000) != HAL_OK) {
         return HAL_TIMEOUT;
     }
-
-    FP_LOG("Capturing 2nd...");
-    if (R307_CaptureWithTimeout(5000) != HAL_OK) {
-        FP_LOG("Capture timeout");
-        return HAL_TIMEOUT;
-    }
-
+    /* Same fix — image already captured, skip redundant GenImg */
     if (R307_Image2Tz(2) != HAL_OK) {
         FP_LOG("Conv 2 failed");
         return HAL_ERROR;
@@ -465,11 +456,9 @@ HAL_StatusTypeDef R307_Verify(uint16_t *out_page_id, uint16_t *out_score)
     	return HAL_TIMEOUT;
     }
 
-    FP_LOG("Capturing...");
-    if (R307_CaptureWithTimeout(5000) != HAL_OK) {
-        FP_LOG("Capture timeout");
-        return HAL_TIMEOUT;
-    }
+    /* WaitForFingerPlacement already ran GenImg and got 0x00 (image captured).
+     * Sending GenImg again here races against the user lifting their finger
+     * and causes ~90% failure rate. Go directly to Image2Tz. */
     if (R307_Image2Tz(1) != HAL_OK) return HAL_ERROR;
 
     // Search entire library; change range if you have different capacity

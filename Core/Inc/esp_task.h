@@ -27,3 +27,5 @@ extern const osThreadAttr_t espTask_attr;
 void EspTask(void *argument);
 /* Called by PwdTask when 'D' is pressed — opens a 15-second face scan window */
 void EspTask_RequestFaceScan(void);
+/* Returns 1 if TCP connection to server is active, 0 otherwise */
+uint8_t EspTask_IsConnected(void);

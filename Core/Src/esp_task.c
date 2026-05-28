@@ -31,15 +31,24 @@ volatile uint8_t g_lcd_dirty     = 0;
 volatile uint8_t g_face_enroll_requested = 0;
 volatile uint8_t g_face_enrolled         = 0;
 
-static uint8_t          s_connected     = 0;
+static volatile uint8_t s_connected     = 0;
 static volatile uint8_t s_face_scan_req = 0;
 
 void EspTask_RequestFaceScan(void) { s_face_scan_req = 1; }
+uint8_t EspTask_IsConnected(void)  { return s_connected; }
+
+/* Forward declaration so esp_send_json can call esp_check_incoming */
+static void esp_check_incoming(void);
 
 /* ── Send a JSON line to laptop via AT+CIPSEND, yields via osDelay ── */
 static uint8_t esp_send_json(const char *json)
 {
     if (!s_connected) return 0;
+
+    /* Process any data that arrived before we clear the buffer.
+     * Without this, a face_ok arriving just before a send (e.g. an LCD
+     * update) would be wiped by Wifi_RxClear() and never processed.    */
+    esp_check_incoming();
 
     uint16_t len = (uint16_t)strlen(json);
     char cmd[32];
@@ -171,9 +180,6 @@ void EspTask(void *argument)
 {
     g_esp_log_queue = xQueueCreate(8, sizeof(EspLogEntry_t));
 
-    /* WiFi starts immediately (no longer waits for g_creds_ready) so that
-     * face enrollment during do_setup() can complete over the network.    */
-
     /* ── Step 1: power and handshake ── */
     Display_Line(1, "WiFi: starting..");
     Wifi_Enable();   /* pulls RST/EN lines, then waits 2 s */
@@ -214,16 +220,27 @@ void EspTask(void *argument)
 
     Display_Line(1, "WiFi: AP Ready! ");
     osDelay(1500);
-    Display_Line(1, "");
 
     /* ── Step 5: TCP client to laptop ── */
     Wifi_TcpIp_SetMultiConnection(false);
     s_connected = esp_try_connect();
+    Display_Line(1, s_connected ? "Server: Online " : "Server: Offline");
 
     uint32_t reconnect_ts = 0;
+    uint8_t  prev_connected = s_connected;
 
     for (;;)
     {
+        /* Always process incoming data first — before any send that would
+         * call Wifi_RxClear() and discard unread responses (e.g. face_ok). */
+        esp_check_incoming();
+
+        /* Update LCD row 1 whenever connection state changes */
+        if (s_connected != prev_connected) {
+            prev_connected = s_connected;
+            Display_Line(1, s_connected ? "Server: Online " : "Server: Offline");
+        }
+
         if (!s_connected) {
             if (HAL_GetTick() - reconnect_ts > 10000u) {
                 reconnect_ts = HAL_GetTick();
@@ -270,9 +287,6 @@ void EspTask(void *argument)
                      (unsigned long)entry.ts, entry.event, entry.factors);
             esp_send_json(json);
         }
-
-        /* Check for incoming messages from laptop */
-        esp_check_incoming();
 
         osDelay(100);
     }

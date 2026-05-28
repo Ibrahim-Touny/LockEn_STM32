@@ -13,23 +13,32 @@ const osThreadAttr_t fpTask_attr = {
     .priority   = (osPriority_t) osPriorityNormal,
 };
 
+volatile uint8_t g_fp_scan_requested = 0;
+
 void FpTask(void *argument)
 {
-    /* Wait for setup to finish */
     while (!g_creds_ready) osDelay(50);
 
     uint32_t last_session = g_session_id - 1u;
-    uint32_t last_fail_tick = 0;
 
     for (;;)
     {
         if (!g_creds_ready) { osDelay(100); continue; }
 
-        /* Already posted for this session — wait until it ends */
-        if (g_session_id == last_session) { osDelay(100); continue; }
+        /* Already posted fingerprint for this session — clear any stale
+         * C-press request so it does not auto-fire on the next session. */
+        if (g_session_id == last_session)
+        {
+            g_fp_scan_requested = 0;
+            osDelay(100);
+            continue;
+        }
 
-        /* R307_Verify blocks until a finger is placed (up to 20 s) or times out.
-         * FreeRTOS preemption keeps other tasks running during the UART waits. */
+        /* Do nothing until the user explicitly presses C */
+        if (!g_fp_scan_requested) { osDelay(100); continue; }
+
+        g_fp_scan_requested = 0;  /* consume the request */
+
         uint16_t id = 0, score = 0;
         uint32_t session_at_start = g_session_id;
         HAL_StatusTypeDef st = R307_Verify(&id, &score);
@@ -38,29 +47,23 @@ void FpTask(void *argument)
 
         if (st == HAL_TIMEOUT)
         {
-            /* No finger present — stay silent */
-            osDelay(50);
+            Display_Both("No Finger", "Detected (C=retry)");
             continue;
         }
 
         if (st != HAL_OK)
         {
-            /* Bad fingerprint — rate limit feedback */
-            uint32_t now = HAL_GetTick();
-            if ((now - last_fail_tick) > 1500U)
-            {
-                last_fail_tick = now;
-                Buzzer_BeepDenied();
-            }
-            osDelay(100);
+            Display_Both("Bad Finger!", "Try again (C)");
+            Buzzer_BeepDenied();
             continue;
         }
 
-        /* Fingerprint matched — post once per session */
+        /* Match — post once per session */
         uint32_t cur = g_session_id;
         if (cur != last_session)
         {
             last_session = cur;
+            Display_Line(0, "Finger OK!");
             Buzzer_BeepOK();
             AuthFactor_t f = FACTOR_FP;
             xQueueSend(g_authEvt, &f, portMAX_DELAY);
