@@ -5,6 +5,7 @@
 #include "display.h"
 #include "buzzer.h"
 #include "keypad.h"
+#include "sleep_manager.h"
 #include "i2c-lcd.h"
 #include "FreeRTOS.h"
 #include "queue.h"
@@ -29,6 +30,16 @@ static uint8_t wait_for_first_key(uint32_t expected_session, char *out_key)
 
         char key = Keypad_Read();
         if (key == 0) { osDelay(20); continue; }
+
+        /* Wakeup path: any key wakes the display but is not used as input */
+        if (g_system_sleeping)
+        {
+            Sleep_Exit();
+            osDelay(20);
+            continue;
+        }
+
+        Sleep_UpdateActivity();
 
         if (key == '#' || key == '*') { osDelay(20); continue; }
 
@@ -84,9 +95,13 @@ static uint8_t read_password(char *out, uint8_t max_len,
     {
         if (g_session_id != expected_session) return 0;
 
+        /* If system slept mid-entry (user walked away), abort this attempt */
+        if (g_system_sleeping) return 0;
+
         char key = Keypad_Read();
         if (key == 0) { osDelay(20); continue; }
 
+        Sleep_UpdateActivity();
         Buzzer_Beep(40);
 
         if (key == '#')

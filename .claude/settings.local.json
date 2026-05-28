@@ -13,7 +13,11 @@
       "Bash(ConvertTo-Json -Depth 100)",
       "PowerShell(Get-NetTCPConnection -LocalPort 3000 -State Listen -ErrorAction SilentlyContinue | Select-Object -ExpandProperty OwningProcess | ForEach-Object { Get-Process -Id $_ })",
       "PowerShell(Stop-Process -Id 24816 -Force)",
-      "Bash(Get-ChildItem -Path \"c:\\\\Users\\\\yasmine\\\\Desktop\\\\LockEn_STM32\" -Recurse -ErrorAction SilentlyContinue)"
+      "Bash(Get-ChildItem -Path \"c:\\\\Users\\\\yasmine\\\\Desktop\\\\LockEn_STM32\" -Recurse -ErrorAction SilentlyContinue)",
+      "Bash(Get-ChildItem -Path \"c:\\\\Users\\\\yasmine\\\\Desktop\\\\LockEn_STM32\" -Recurse -Filter \"*.ioc\")",
+      "Bash(Select-Object -ExpandProperty FullName)",
+      "Bash(Get-ChildItem -Path \"c:\\\\Users\\\\yasmine\\\\Desktop\\\\LockEn_STM32\" -Recurse -File)",
+      "Bash(Select-Object -First 50)"
     ]
   }
 }

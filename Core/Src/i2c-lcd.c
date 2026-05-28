@@ -83,3 +83,15 @@ void lcd_send_string (char *str)
 {
 	while (*str) lcd_send_data (*str++);
 }
+
+void lcd_backlight_off(void)
+{
+    uint8_t d = 0x00;
+    HAL_I2C_Master_Transmit(&hi2c1, SLAVE_ADDRESS_LCD, &d, 1, 100);
+}
+
+void lcd_backlight_on(void)
+{
+    uint8_t d = 0x08;
+    HAL_I2C_Master_Transmit(&hi2c1, SLAVE_ADDRESS_LCD, &d, 1, 100);
+}

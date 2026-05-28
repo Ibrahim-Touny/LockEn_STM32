@@ -3,6 +3,7 @@
 #include "display.h"
 #include "buzzer.h"
 #include "rc522.h"
+#include "sleep_manager.h"
 #include "esp_task.h"
 #include "FreeRTOS.h"
 #include "queue.h"
@@ -31,6 +32,10 @@ void RfidTask(void *argument)
         uint8_t str[MAX_LEN];
         if (MFRC522_Request(PICC_REQIDL, str) != MI_OK) { osDelay(200); continue; }
         if (MFRC522_Anticoll(str)             != MI_OK) { osDelay(200); continue; }
+
+        /* Card in range — wake display and reset idle timer regardless of card validity */
+        if (g_system_sleeping) Sleep_Exit();
+        Sleep_UpdateActivity();
 
         if (memcmp(str, g_creds.uid, 5) != 0)
         {

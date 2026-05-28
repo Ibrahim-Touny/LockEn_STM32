@@ -4,6 +4,7 @@
 #include "buzzer.h"
 #include "keypad.h"
 #include "tamper_task.h"
+#include "sleep_manager.h"
 #include "main.h"
 #include "rc522.h"
 #include "R307.h"
@@ -332,6 +333,7 @@ void AuthTask(void *argument)
 
     g_session_id  = 1;
     g_creds_ready = 1;
+    Sleep_UpdateActivity();   /* start idle timer from this point */
 
     Display_Both("Scan 2 factors", "Any order OK");
     osDelay(1500);
@@ -348,6 +350,10 @@ void AuthTask(void *argument)
             osDelay(50);
             if (ResetButton_IsPressed())
             {
+                /* Wake display before setup — lcd_init inside do_setup
+                 * will restore the backlight, but clearing the flag here
+                 * ensures no task re-enters sleep during setup. */
+                if (g_system_sleeping) { g_system_sleeping = 0; }
                 g_creds_ready = 0;
                 osDelay(300);           /* let sensor tasks reach idle check */
                 Solenoid_Lock();
@@ -372,6 +378,7 @@ void AuthTask(void *argument)
 
                 g_session_id++;
                 g_creds_ready = 1;
+                Sleep_UpdateActivity();
                 Display_Both("Scan 2 factors", "");
                 continue;
             }
@@ -383,6 +390,7 @@ void AuthTask(void *argument)
             uint8_t tevt;
             if (xQueueReceive(g_tamperEvt, &tevt, 0) == pdTRUE)
             {
+                if (g_system_sleeping) Sleep_Exit();
                 Display_Both("!! TAMPER !!", "Device moved");
                 Buzzer_Alarm(1500);
                 esp_log("TAMPER", 0);
@@ -390,6 +398,7 @@ void AuthTask(void *argument)
                 session_start = 0;
                 g_session_id++;
                 Display_Both("Scan 2 factors", "");
+                Sleep_UpdateActivity();   /* give user time to respond */
                 continue;
             }
         }
@@ -403,12 +412,23 @@ void AuthTask(void *argument)
             session_start = 0;
             g_session_id++;
             Display_Both("Scan 2 factors", "");
+            Sleep_UpdateActivity();   /* give user time to try again */
             continue;
         }
 
         /* ── Receive a verified factor from sensor tasks ───────────────── */
         AuthFactor_t factor;
-        if (xQueueReceive(g_authEvt, &factor, pdMS_TO_TICKS(100)) != pdTRUE) continue;
+        if (xQueueReceive(g_authEvt, &factor, pdMS_TO_TICKS(100)) != pdTRUE)
+        {
+            /* Nothing received — enter sleep if idle too long and no session in progress */
+            if (!g_system_sleeping && bitmask == 0 && Sleep_IsTimeoutExpired())
+                Sleep_Enter();
+            continue;
+        }
+
+        /* Factor received — wake display if sleeping */
+        if (g_system_sleeping) Sleep_Exit();
+        Sleep_UpdateActivity();
 
         if (bitmask == 0) session_start = HAL_GetTick();
         bitmask |= (uint8_t)factor;
@@ -430,6 +450,7 @@ void AuthTask(void *argument)
             session_start = 0;
             g_session_id++;
             Display_Both("Scan 2 factors", "");
+            Sleep_UpdateActivity();   /* door just opened — reset idle timer */
         }
         else
         {
