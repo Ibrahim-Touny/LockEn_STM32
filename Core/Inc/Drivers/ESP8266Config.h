@@ -24,7 +24,7 @@
 /*
  * Size of UART receive buffer (bytes)
  */
-#define		_WIFI_RX_SIZE					512
+#define		_WIFI_RX_SIZE					2048
 
 /*
  * Size of buffer for receiving data payload (bytes)

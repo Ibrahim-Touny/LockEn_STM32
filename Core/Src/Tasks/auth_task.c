@@ -253,11 +253,30 @@ static void setup_register_password(void)
  */
 static void setup_enroll_face(void)
 {
-    g_face_enrolled          = 0;
-    g_face_enroll_requested  = 1;
+    uint8_t  was_connected = 0xFF;
+    uint32_t start_ms      = HAL_GetTick();
+
+    g_face_enrolled         = 0;
+    g_face_enroll_requested = 1;
     Display_Line(0, "Look at camera");
-    Display_Line(1, "");
-    while (!g_face_enrolled) osDelay(200);
+    Display_Line(1, "Connecting...  ");
+
+    while (!g_face_enrolled) {
+        uint8_t connected = EspTask_IsConnected();
+        if (connected != was_connected) {
+            was_connected = connected;
+            Display_Line(1, connected ? "Server online  " : "Server offline ");
+        } else if (connected) {
+            Display_Line(1, "Enrolling...    ");
+        }
+
+        if ((HAL_GetTick() - start_ms) > 120000u) {
+            Display_Timed("Face timeout!", "Press RST=retry", 2500);
+            return;
+        }
+        osDelay(200);
+    }
+
     Buzzer_BeepOK();
     Display_Timed("Face enrolled!", "", 1500);
 }

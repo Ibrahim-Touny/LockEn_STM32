@@ -38,8 +38,9 @@ volatile uint8_t g_lcd_dirty     = 0;
 volatile uint8_t g_face_enroll_requested = 0;
 volatile uint8_t g_face_enrolled         = 0;
 
-static volatile uint8_t s_connected     = 0;
-static volatile uint8_t s_face_scan_req = 0;
+static volatile uint8_t s_connected            = 0;
+static volatile uint8_t s_face_scan_req        = 0;
+static volatile uint8_t s_waiting_enroll_done  = 0;
 
 /**
  * @brief Request a face scan from the remote server.
@@ -53,8 +54,9 @@ void EspTask_RequestFaceScan(void) { s_face_scan_req = 1; }
  */
 uint8_t EspTask_IsConnected(void)  { return s_connected; }
 
-/* Forward declaration so esp_send_json can call esp_check_incoming */
+/* Forward declarations */
 static void esp_check_incoming(void);
+static uint8_t esp_at_cmd(const char *cmd, const char *expect, uint32_t timeout_ms);
 
 /**
  * @brief Send a JSON command string to the remote server via AT+CIPSEND.
@@ -70,8 +72,7 @@ static uint8_t esp_send_json(const char *json)
     if (!s_connected) return 0;
 
     /* Process any data that arrived before we clear the buffer.
-     * Without this, a face_ok arriving just before a send (e.g. an LCD
-     * update) would be wiped by Wifi_RxClear() and never processed.    */
+     * Without this, enroll_done / face_ok can be wiped by Wifi_RxClear(). */
     esp_check_incoming();
 
     uint16_t len = (uint16_t)strlen(json);
@@ -81,14 +82,25 @@ static uint8_t esp_send_json(const char *json)
     Wifi_RxClear();
     HAL_UART_Transmit(&huart2, (uint8_t *)cmd, (uint16_t)strlen(cmd), 1000);
 
-    for (uint16_t i = 0; i < 200; i++) {
-        if (strstr((char *)Wifi.RxBuffer, ">")) break;
-        osDelay(10);
-        if (i == 199) { s_connected = 0; return 0; }
+    uint8_t got_prompt = 0;
+    for (uint8_t attempt = 0; attempt < 3 && !got_prompt; attempt++) {
+        for (uint16_t i = 0; i < 100; i++) {
+            esp_check_incoming();
+            if (strstr((char *)Wifi.RxBuffer, ">")) { got_prompt = 1; break; }
+            osDelay(10);
+        }
+        if (!got_prompt) {
+            HAL_UART_Transmit(&huart2, (uint8_t *)cmd, (uint16_t)strlen(cmd), 1000);
+        }
     }
+    if (!got_prompt) { s_connected = 0; return 0; }
 
     HAL_UART_Transmit(&huart2, (uint8_t *)json, len, 1000);
-    osDelay(150);
+
+    for (uint16_t i = 0; i < 30; i++) {
+        esp_check_incoming();
+        osDelay(10);
+    }
     return 1;
 }
 
@@ -102,6 +114,11 @@ static uint8_t esp_send_json(const char *json)
 static uint8_t esp_try_connect(void)
 {
     char cmd[64];
+
+    /* Close stale socket before opening a new one */
+    esp_at_cmd("AT+CIPCLOSE\r\n", "OK", 1500);
+    osDelay(200);
+
     snprintf(cmd, sizeof(cmd),
              "AT+CIPSTART=\"TCP\",\"%s\",%d,10\r\n", LAPTOP_IP, LAPTOP_PORT);
 
@@ -123,6 +140,12 @@ static uint8_t esp_try_connect(void)
  * Checks for face_ok, enroll_done, and pwd (remote PIN) messages.
  * Updates state variables or posts auth factors to the auth queue.
  */
+static void esp_erase_from(char *start)
+{
+    for (char *p = start; p < (char *)Wifi.RxBuffer + _WIFI_RX_SIZE && *p; p++)
+        *p = ' ';
+}
+
 static void esp_check_incoming(void)
 {
     char *rx = (char *)Wifi.RxBuffer;
@@ -130,6 +153,24 @@ static void esp_check_incoming(void)
     if (strstr(rx, "CLOSED")) {
         s_connected = 0;
         Wifi_RxClear();
+        return;
+    }
+
+    /* Match anywhere in the buffer — resilient to partial +IPD headers */
+    if (strstr(rx, "enroll_done")) {
+        g_face_enrolled         = 1;
+        s_waiting_enroll_done   = 0;
+        esp_erase_from(rx);
+        return;
+    }
+
+    if (strstr(rx, "face_ok")) {
+        if (g_authEvt) {
+            AuthFactor_t f = FACTOR_FACE;
+            xQueueSend(g_authEvt, &f, 0);
+        }
+        Display_Line(0, "Face: OK!");
+        esp_erase_from(rx);
         return;
     }
 
@@ -141,30 +182,9 @@ static void esp_check_incoming(void)
 
     char *payload = colon + 1;
 
-    /* enroll_done — server confirms face was stored */
-    if (strstr(payload, "\"t\":\"enroll_done\"")) {
-        g_face_enrolled = 1;
-        char *mark = ipd;
-        while (*mark && *mark != '\n') *mark++ = ' ';
-        return;
-    }
-
-    /* face_ok — server matched the enrolled face */
-    if (strstr(payload, "\"t\":\"face_ok\"")) {
-        if (g_authEvt) {
-            AuthFactor_t f = FACTOR_FACE;
-            xQueueSend(g_authEvt, &f, 0);
-        }
-        Display_Line(0, "Face: OK!");
-        char *mark = ipd;
-        while (*mark && *mark != '\n') *mark++ = ' ';
-        return;
-    }
-
     /* pwd — remote PIN entry from browser */
     if (!strstr(payload, "\"t\":\"pwd\"")) {
-        char *mark = ipd;
-        while (mark <= colon) *mark++ = ' ';
+        esp_erase_from(ipd);
         return;
     }
 
@@ -278,7 +298,8 @@ void EspTask(void *argument)
     s_connected = esp_try_connect();
     Display_Line(1, s_connected ? "Server: Online " : "Server: Offline");
 
-    uint32_t reconnect_ts = 0;
+    uint32_t reconnect_ts   = 0;
+    uint32_t last_keepalive_ts = 0;
     uint8_t  prev_connected = s_connected;
 
     for (;;)
@@ -294,18 +315,26 @@ void EspTask(void *argument)
         }
 
         if (!s_connected) {
-            if (HAL_GetTick() - reconnect_ts > 10000u) {
+            uint32_t retry_ms = s_waiting_enroll_done ? 2000u : 10000u;
+            if (HAL_GetTick() - reconnect_ts > retry_ms) {
                 reconnect_ts = HAL_GetTick();
                 Wifi_TcpIp_SetMultiConnection(false);
                 s_connected = esp_try_connect();
             }
-            osDelay(500);
+            osDelay(s_waiting_enroll_done ? 100 : 500);
             continue;
+        }
+
+        /* Light keepalive while waiting for enroll_done (Python can take 15+ s) */
+        if (s_waiting_enroll_done && (HAL_GetTick() - last_keepalive_ts) > 5000u) {
+            last_keepalive_ts = HAL_GetTick();
+            esp_send_json("{\"t\":\"ping\"}\n");
         }
 
         /* Enrollment trigger — sent once per setup/reset cycle */
         if (g_face_enroll_requested) {
             g_face_enroll_requested = 0;
+            s_waiting_enroll_done   = 1;
             esp_send_json("{\"t\":\"enroll_reset\"}\n");
         }
 
@@ -315,8 +344,8 @@ void EspTask(void *argument)
             esp_send_json("{\"t\":\"face_scan\"}\n");
         }
 
-        /* Push LCD state whenever display.c sets g_lcd_dirty */
-        if (g_lcd_dirty) {
+        /* Push LCD state — skip while waiting for enroll_done to keep TCP clear */
+        if (g_lcd_dirty && !s_waiting_enroll_done) {
             g_lcd_dirty = 0;
             char l0[17], l1[17];
             osMutexAcquire(g_lcd_mutex, portMAX_DELAY);
@@ -340,6 +369,6 @@ void EspTask(void *argument)
             esp_send_json(json);
         }
 
-        osDelay(100);
+        osDelay(s_waiting_enroll_done ? 20 : 100);
     }
 }

@@ -269,9 +269,10 @@ void Wifi_TxClear(void)
  */
 void Wifi_RxCallBack(void)
 {
-	Wifi.RxBuffer[Wifi.RxIndex] = Wifi.usartBuff;
-	if(Wifi.RxIndex < _WIFI_RX_SIZE)
-	  Wifi.RxIndex++;
+	if (Wifi.RxIndex < (_WIFI_RX_SIZE - 1u)) {
+		Wifi.RxBuffer[Wifi.RxIndex++] = Wifi.usartBuff;
+		Wifi.RxBuffer[Wifi.RxIndex]   = '\0';
+	}
 	HAL_UART_Receive_IT(&_WIFI_USART,&Wifi.usartBuff,1);
 }
 /**

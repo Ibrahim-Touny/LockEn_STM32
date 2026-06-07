@@ -13,6 +13,7 @@ const MAX_LOG   = 50;
 const PYTHON_EXE = fs.existsSync(path.join(__dirname, '..', '.venv', 'Scripts', 'python.exe'))
     ? path.join(__dirname, '..', '.venv', 'Scripts', 'python.exe')
     : 'python';
+const FRAME_PATH = path.join(__dirname, '_frame.jpg');
 
 let lcdState = { l0: '---', l1: '' };
 let accessLog = [];
@@ -22,11 +23,17 @@ let pendingPwdCallback = null;
 let enrolling = false;
 let scanning  = false;
 let scanTimer = null;
+let lastCameraFrame = null;
+let lastCameraAt    = 0;
+let idleFrameLogged = false;
+let pendingSafeMsg  = null;
+let pendingRetryTimer = null;
 
 /* ── Python face-recognition child process ── */
-let pyProc      = null;
-let pyBusy      = false;
-let pyCallbacks = [];
+let pyProc         = null;
+let pyBusy         = false;
+let pyCallbacks    = [];
+let pyPendingFrame = null;
 
 function spawnPython() {
     pyProc = spawn(PYTHON_EXE, [path.join(__dirname, 'face_recog.py')]);
@@ -37,12 +44,14 @@ function spawnPython() {
         pyBuf = lines.pop();
         lines.forEach(line => {
             line = line.trim();
-            if (!line) return;
+            if (!line.startsWith('{')) return; /* ignore InsightFace/ONNX stdout noise */
             try {
                 const msg = JSON.parse(line);
                 const cb  = pyCallbacks.shift();
                 if (cb) { pyBusy = false; cb(msg); }
-            } catch (_) {}
+            } catch (err) {
+                console.error('[Python] Bad JSON:', line.slice(0, 120));
+            }
         });
     });
     pyProc.stderr.on('data', d => console.error('[Python]', d.toString().trim()));
@@ -54,10 +63,132 @@ function spawnPython() {
 }
 
 function pyRequest(obj, callback) {
-    if (!pyProc || pyBusy) { callback({ result: 'busy' }); return; }
+    if (!pyProc) { callback({ result: 'error', msg: 'python_not_ready' }); return; }
+    if (pyBusy) { callback({ result: 'busy' }); return; }
     pyBusy = true;
     pyCallbacks.push(callback);
-    pyProc.stdin.write(JSON.stringify(obj) + '\n');
+    const data = JSON.stringify(obj) + '\n';
+    if (!pyProc.stdin.write(data)) {
+        pyProc.stdin.once('drain', () => {});
+    }
+}
+
+function processPendingFrame() {
+    if (pyBusy || !pyPendingFrame || !pyProc) return;
+
+    const { cmd, imagePath } = pyPendingFrame;
+    pyPendingFrame = null;
+
+    pyRequest({ cmd, image_path: imagePath }, result => {
+        if (cmd === 'enroll') {
+            if (result.result === 'enrolled') {
+                enrolling = false;
+                deliverEnrollDone();
+                broadcast({ type: 'face_status', status: 'enrolled' });
+                console.log(`[Face] Enrollment complete (${result.samples || 4} samples averaged)`);
+            } else if (result.result === 'progress') {
+                console.log(`[Face] Enroll: ${result.count}/${result.needed} samples — hold still`);
+            } else if (result.result === 'no_face') {
+                console.log('[Face] Enroll: no face detected — look straight at camera');
+            } else if (result.result === 'busy') {
+                pyPendingFrame = { cmd, imagePath };
+            } else {
+                console.log('[Face] Enroll result:', result.result, result.msg || '');
+            }
+        } else if (cmd === 'recognize') {
+            if (result.result === 'match') {
+                scanning = false;
+                if (scanTimer) { clearTimeout(scanTimer); scanTimer = null; }
+                deliverFaceOk();
+                broadcast({ type: 'face_status', status: 'matched' });
+                console.log(`[Face] Match (similarity ${(result.similarity || 0).toFixed(3)})`);
+            } else if (result.result === 'no_face') {
+                console.log('[Face] Scan: no face detected');
+            } else if (result.result === 'busy') {
+                pyPendingFrame = { cmd, imagePath };
+            } else if (result.result === 'no_match') {
+                const sim = result.similarity != null ? ` similarity ${result.similarity.toFixed(3)}` : '';
+                console.log(`[Face] Scan: no match${sim}`);
+            } else {
+                console.log('[Face] Scan result:', result.result, result.msg || '');
+            }
+        }
+
+        processPendingFrame();
+    });
+}
+
+function queueFaceFrame(imageBuf) {
+    try {
+        fs.writeFileSync(FRAME_PATH, imageBuf);
+    } catch (err) {
+        console.error('[Camera] Failed to write frame file:', err.message);
+        return null;
+    }
+    return FRAME_PATH;
+}
+
+function queueCurrentFrame(cmd) {
+    if (!lastCameraFrame) return;
+    const imagePath = queueFaceFrame(lastCameraFrame);
+    if (!imagePath) return;
+    pyPendingFrame = { cmd, imagePath };
+    processPendingFrame();
+}
+
+function startEnrollment() {
+    enrolling = true;
+    scanning  = false;
+    idleFrameLogged = false;
+    if (scanTimer) { clearTimeout(scanTimer); scanTimer = null; }
+    broadcast({ type: 'face_status', status: 'enrolling' });
+    console.log('[Face] Enrollment started — processing frames');
+    pyRequest({ cmd: 'reset' }, () => {
+        queueCurrentFrame('enroll');
+        processPendingFrame();
+    });
+}
+
+function startScan() {
+    if (enrolling) return;
+    scanning = true;
+    idleFrameLogged = false;
+    if (scanTimer) clearTimeout(scanTimer);
+    scanTimer = setTimeout(() => {
+        scanning = false;
+        broadcast({ type: 'face_status', status: 'idle' });
+        console.log('[Face] Scan window closed');
+    }, 30000);
+    broadcast({ type: 'face_status', status: 'scanning' });
+    console.log('[Face] Scan window open (15 s)');
+    queueCurrentFrame('recognize');
+}
+
+function handleCameraFrame(imageBuf) {
+    lastCameraFrame = imageBuf;
+    lastCameraAt    = Date.now();
+    broadcast({
+        type: 'camera',
+        online: true,
+        bytes: imageBuf.length,
+        at: lastCameraAt,
+    });
+
+    if (!enrolling && !scanning) {
+        if (!idleFrameLogged) {
+            console.log('[Camera] Receiving frames — waiting for enrollment or scan trigger');
+            idleFrameLogged = true;
+        }
+        return;
+    }
+
+    console.log(`[Face] Processing frame ${imageBuf.length} bytes`);
+    const imagePath = queueFaceFrame(imageBuf);
+    if (!imagePath) return;
+
+    const cmd = enrolling ? 'enroll' : 'recognize';
+    pyPendingFrame = { cmd, imagePath };
+    processPendingFrame();
 }
 
 spawnPython();
@@ -67,8 +198,15 @@ spawnPython();
  * ══════════════════════════════════════════════════════════════════════ */
 const tcpServer = net.createServer(socket => {
     console.log('[TCP] Safe connected from', socket.remoteAddress);
+    if (tcpSocket && !tcpSocket.destroyed) tcpSocket.destroy();
     tcpSocket = socket;
+    socket.setKeepAlive(true, 10000);
+    socket.setNoDelay(true);
     broadcast({ type: 'connected', ok: true });
+    setTimeout(() => {
+        if (pendingSafeMsg && pendingSafeMsg.t === 'enroll_done') deliverEnrollDone();
+        else flushPendingSafeMsg();
+    }, 800);
 
     let rxBuf = '';
     socket.on('data', chunk => {
@@ -123,33 +261,85 @@ function handleSafeMessage(msg) {
             break;
 
         case 'enroll_reset':
-            enrolling = true;
-            scanning  = false;
-            if (scanTimer) { clearTimeout(scanTimer); scanTimer = null; }
-            broadcast({ type: 'face_status', status: 'enrolling' });
-            pyRequest({ cmd: 'reset' }, () => {});
-            console.log('[Face] Enrollment started');
+            startEnrollment();
             break;
 
         case 'face_scan':
-            if (!enrolling) {
-                scanning = true;
-                if (scanTimer) clearTimeout(scanTimer);
-                scanTimer = setTimeout(() => {
-                    scanning = false;
-                    broadcast({ type: 'face_status', status: 'idle' });
-                }, 15000);
-                broadcast({ type: 'face_status', status: 'scanning' });
-                console.log('[Face] Scan window open (15 s)');
-            }
+            startScan();
+            break;
+
+        case 'ping':
             break;
     }
 }
 
 function sendToSafe(obj) {
     if (!tcpSocket || tcpSocket.destroyed) return false;
-    try { tcpSocket.write(JSON.stringify(obj) + '\n'); return true; }
-    catch (_) { return false; }
+    try {
+        tcpSocket.write(JSON.stringify(obj) + '\n');
+        return true;
+    } catch (_) { return false; }
+}
+
+function flushPendingSafeMsg() {
+    if (!pendingSafeMsg || !sendToSafe(pendingSafeMsg)) return;
+    console.log('[TCP] Delivered queued message:', pendingSafeMsg.t);
+    pendingSafeMsg = null;
+    if (pendingRetryTimer) { clearInterval(pendingRetryTimer); pendingRetryTimer = null; }
+}
+
+function schedulePendingRetry() {
+    if (pendingRetryTimer || !pendingSafeMsg) return;
+    let attempts = 0;
+    pendingRetryTimer = setInterval(() => {
+        if (!pendingSafeMsg) {
+            clearInterval(pendingRetryTimer);
+            pendingRetryTimer = null;
+            return;
+        }
+        if (sendToSafe(pendingSafeMsg)) {
+            console.log('[TCP] Delivered queued message:', pendingSafeMsg.t);
+            pendingSafeMsg = null;
+            clearInterval(pendingRetryTimer);
+            pendingRetryTimer = null;
+            return;
+        }
+        if (++attempts >= 60) {
+            console.error('[TCP] Gave up delivering:', pendingSafeMsg.t);
+            clearInterval(pendingRetryTimer);
+            pendingRetryTimer = null;
+        }
+    }, 2000);
+}
+
+function queueSafeMsg(obj) {
+    pendingSafeMsg = obj;
+    schedulePendingRetry();
+}
+
+function burstToSafe(obj, times, gapMs) {
+    if (!tcpSocket || tcpSocket.destroyed) return false;
+    for (let i = 0; i < times; i++) {
+        setTimeout(() => sendToSafe(obj), i * gapMs);
+    }
+    return true;
+}
+
+function deliverEnrollDone() {
+    const msg = { t: 'enroll_done' };
+    if (burstToSafe(msg, 5, 500)) {
+        console.log('[Face] enroll_done sent to safe (5x burst)');
+        pendingSafeMsg = null;
+        if (pendingRetryTimer) { clearInterval(pendingRetryTimer); pendingRetryTimer = null; }
+    } else {
+        queueSafeMsg(msg);
+        console.log('[Face] enroll_done queued for safe reconnect');
+    }
+}
+
+function deliverFaceOk() {
+    const msg = { t: 'face_ok' };
+    if (!burstToSafe(msg, 3, 400)) queueSafeMsg(msg);
 }
 
 function broadcast(obj) {
@@ -206,7 +396,59 @@ const httpServer = http.createServer((req, res) => {
 
     } else if (req.method === 'GET' && req.url === '/api/state') {
         res.writeHead(200, { 'Content-Type': 'application/json' });
-        res.end(JSON.stringify({ lcd: lcdState, connected: !!tcpSocket }));
+        res.end(JSON.stringify({
+            lcd: lcdState,
+            connected: !!tcpSocket,
+            camera: {
+                online: !!lastCameraFrame && (Date.now() - lastCameraAt) < 5000,
+                lastAt: lastCameraAt || null,
+                bytes: lastCameraFrame ? lastCameraFrame.length : 0,
+                enrolling,
+                scanning,
+            },
+        }));
+
+    } else if (req.method === 'POST' && req.url === '/api/face/enroll') {
+        if (enrolling) {
+            res.writeHead(409, { 'Content-Type': 'application/json' });
+            res.end('{"ok":false,"error":"already_enrolling"}');
+            return;
+        }
+        if (!lastCameraFrame || (Date.now() - lastCameraAt) > 5000) {
+            res.writeHead(503, { 'Content-Type': 'application/json' });
+            res.end('{"ok":false,"error":"camera_offline"}');
+            return;
+        }
+        startEnrollment();
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end('{"ok":true}');
+
+    } else if (req.method === 'POST' && req.url === '/api/face/scan') {
+        if (enrolling) {
+            res.writeHead(409, { 'Content-Type': 'application/json' });
+            res.end('{"ok":false,"error":"enrolling"}');
+            return;
+        }
+        if (!lastCameraFrame || (Date.now() - lastCameraAt) > 5000) {
+            res.writeHead(503, { 'Content-Type': 'application/json' });
+            res.end('{"ok":false,"error":"camera_offline"}');
+            return;
+        }
+        startScan();
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end('{"ok":true}');
+
+    } else if (req.method === 'GET' && req.url === '/api/face/preview') {
+        if (!lastCameraFrame) {
+            res.writeHead(404, { 'Content-Type': 'text/plain' });
+            res.end('No camera frame yet');
+            return;
+        }
+        res.writeHead(200, {
+            'Content-Type': 'image/jpeg',
+            'Cache-Control': 'no-store',
+        });
+        res.end(lastCameraFrame);
 
     } else if (req.method === 'GET' && req.url === '/logo.png') {
         const logoPath = path.join(__dirname, 'logo.png');
@@ -220,28 +462,16 @@ const httpServer = http.createServer((req, res) => {
         const chunks = [];
         req.on('data', d => chunks.push(d));
         req.on('end', () => {
+            const imageBuf = Buffer.concat(chunks);
             res.writeHead(200);
             res.end('ok');
 
-            if (!enrolling && !scanning) return; /* discard when idle */
+            if (imageBuf.length < 100) {
+                console.log('[Camera] Frame too small — ignored');
+                return;
+            }
 
-            const imageB64 = Buffer.concat(chunks).toString('base64');
-            const cmd = enrolling ? 'enroll' : 'recognize';
-
-            pyRequest({ cmd, image: imageB64 }, result => {
-                if (cmd === 'enroll' && result.result === 'enrolled') {
-                    enrolling = false;
-                    sendToSafe({ t: 'enroll_done' });
-                    broadcast({ type: 'face_status', status: 'enrolled' });
-                    console.log('[Face] Enrollment complete');
-                } else if (cmd === 'recognize' && result.result === 'match') {
-                    scanning = false;
-                    if (scanTimer) { clearTimeout(scanTimer); scanTimer = null; }
-                    sendToSafe({ t: 'face_ok' });
-                    broadcast({ type: 'face_status', status: 'matched' });
-                    console.log('[Face] Match — factor posted to safe');
-                }
-            });
+            handleCameraFrame(imageBuf);
         });
 
     } else {
@@ -278,10 +508,17 @@ const DASHBOARD_HTML = /* html */`<!DOCTYPE html>
 body{font-family:'Segoe UI',sans-serif;background:#7ec4d8;color:#0e0e1e;padding:24px;min-height:100vh;display:flex;flex-direction:column}
 .logo{max-height:100px;max-width:360px;object-fit:contain;margin-bottom:4px;display:block;margin-left:auto;margin-right:auto}
 .subtitle{color:#2e6070;font-size:1.2rem;margin-bottom:20px;text-align:center}
-.status-bar{display:flex;align-items:center;justify-content:center;gap:10px;margin-bottom:20px}
+.status-bar{display:flex;align-items:center;justify-content:center;gap:10px;margin-bottom:20px;flex-wrap:wrap}
 .badge{display:inline-block;padding:6px 20px;border-radius:12px;font-size:.85rem;font-weight:bold;transition:all .3s}
 .badge.online{background:#00995822;color:#005a38;border:1px solid #009958}
 .badge.offline{background:#dd333318;color:#aa1a00;border:1px solid #dd3333}
+.camera-preview{width:100%;max-width:480px;border-radius:8px;border:1px solid #6ab4cc;background:#0b1a0b;min-height:180px;object-fit:contain}
+.camera-meta{font-size:.8rem;color:#2e6070;margin-top:8px}
+.face-actions{display:flex;gap:8px;flex-wrap:wrap;margin-top:10px}
+.face-btn{background:#2090b0;color:#fff;border:none;padding:8px 12px;border-radius:6px;cursor:pointer;font-size:.85rem;font-weight:bold}
+.face-btn:hover{background:#1a7898}
+.face-btn:disabled{opacity:.4;cursor:default}
+.face-status{font-size:.82rem;color:#2e6070;margin-top:8px;min-height:1.2em}
 .grid{display:grid;grid-template-columns:340px 1fr;gap:20px;width:100%;flex:1}
 @media(max-width:700px){.grid{grid-template-columns:1fr}}
 .card{background:#bde0ee;border-radius:10px;padding:20px;border:1px solid #6ab4cc;display:flex;flex-direction:column}
@@ -317,6 +554,7 @@ tbody td{padding:6px 8px;border-bottom:1px solid #8abcd0;color:#0e0e1e}
 <p class="subtitle">Remote dashboard</p>
 <div class="status-bar">
   <span class="badge offline" id="conn-badge">Disconnected</span>
+  <span class="badge offline" id="cam-badge">Camera Offline</span>
 </div>
 
 <div class="grid">
@@ -326,6 +564,17 @@ tbody td{padding:6px 8px;border-bottom:1px solid #8abcd0;color:#0e0e1e}
       <div class="lcd-row" id="lcd0">                </div>
       <div class="lcd-row" id="lcd1">                </div>
     </div>
+
+    <hr class="sep">
+
+    <h2>Camera</h2>
+    <img class="camera-preview" id="cam-preview" alt="ESP32-CAM preview">
+    <div class="camera-meta" id="cam-meta">Waiting for frames from 192.168.4.3…</div>
+    <div class="face-actions">
+      <button class="face-btn" id="enroll-btn" onclick="startEnroll()">Enroll Face</button>
+      <button class="face-btn" id="scan-btn" onclick="startScan()">Test Scan</button>
+    </div>
+    <div class="face-status" id="face-status">Idle — frames are stored for preview only until enrollment or scan starts.</div>
 
     <hr class="sep">
 
@@ -359,9 +608,64 @@ ws.onmessage = e => {
   else if (msg.type === 'lcd')       { setLcd(msg); }
   else if (msg.type === 'log')       { addRow(msg.entry); }
   else if (msg.type === 'connected') { setConnected(msg.ok); }
+  else if (msg.type === 'camera')      { setCamera(msg); }
+  else if (msg.type === 'face_status') { setFaceStatus(msg.status); }
 };
 
 ws.onerror = () => setConnected(false);
+
+function setCamera(msg) {
+  const b = document.getElementById('cam-badge');
+  b.textContent = msg.online ? 'Camera Online' : 'Camera Offline';
+  b.className   = 'badge ' + (msg.online ? 'online' : 'offline');
+  document.getElementById('cam-meta').textContent =
+    msg.online ? ('Last frame: ' + msg.bytes + ' bytes') : 'No recent frames';
+}
+
+setInterval(() => {
+  const img = document.getElementById('cam-preview');
+  img.src = '/api/face/preview?t=' + Date.now();
+}, 1000);
+
+function setFaceStatus(status) {
+  const el = document.getElementById('face-status');
+  const map = {
+    enrolling: 'Enrolling — look at the camera…',
+    enrolled:  'Face enrolled successfully.',
+    scanning:  'Scanning for 15 seconds…',
+    matched:   'Face matched.',
+    idle:      'Idle — waiting for enrollment or scan.',
+  };
+  el.textContent = map[status] || status;
+}
+
+async function startEnroll() {
+  const btn = document.getElementById('enroll-btn');
+  btn.disabled = true;
+  setFaceStatus('enrolling');
+  try {
+    const r = await fetch('/api/face/enroll', { method: 'POST' });
+    const d = await r.json();
+    if (!d.ok) setFaceStatus('Error: ' + (d.error || 'failed'));
+  } catch (_) {
+    setFaceStatus('Network error starting enrollment.');
+  }
+  btn.disabled = false;
+}
+
+async function startScan() {
+  const btn = document.getElementById('scan-btn');
+  btn.disabled = true;
+  setFaceStatus('scanning');
+  try {
+    const r = await fetch('/api/face/scan', { method: 'POST' });
+    const d = await r.json();
+    if (!d.ok) setFaceStatus('Error: ' + (d.error || 'failed'));
+  } catch (_) {
+    setFaceStatus('Network error starting scan.');
+  }
+  btn.disabled = false;
+}
 
 function setConnected(ok) {
   const b = document.getElementById('conn-badge');

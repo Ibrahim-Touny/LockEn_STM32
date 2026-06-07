@@ -2,63 +2,101 @@
 """
 Face recognition worker — spawned once by server.js, communicates via stdin/stdout JSON lines.
 
-Install:
-    pip install insightface onnxruntime opencv-python
-
-On first run, InsightFace downloads model files (~100 MB) to ~/.insightface/models/
-
 Protocol:
-  IN  {"cmd":"reset"}                        -> {"result":"ok"}
-  IN  {"cmd":"enroll",    "image":"<b64>"}   -> {"result":"enrolled"} | {"result":"no_face"} | {"result":"error"}
-  IN  {"cmd":"recognize", "image":"<b64>"}   -> {"result":"match"}    | {"result":"no_match"} | {"result":"no_face"} | {"result":"error"}
+  IN  {"cmd":"reset"}
+  IN  {"cmd":"enroll",    "image_path":"..."}  -> progress until enough samples, then enrolled
+  IN  {"cmd":"recognize", "image_path":"..."}  -> match | no_match | no_face | error
 """
 import sys
 import json
-import base64
-import io
 import os
 
 import numpy as np
 import cv2
-from PIL import Image
 from insightface.app import FaceAnalysis
 
 EMBEDDING_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'face_embedding.npy')
-THRESHOLD = 0.50   # cosine similarity — raise to 0.60 if too many false positives
+THRESHOLD = 0.32
+MIN_DET_SCORE = 0.40
+ENROLL_SAMPLES_REQUIRED = 4
 
 app = None
+enroll_samples = []
+
+_protocol_out = os.fdopen(os.dup(1), 'w', encoding='utf-8', buffering=1, closefd=True)
+sys.stdout = sys.stderr
+
+
+def log(msg):
+    sys.stderr.write(msg + '\n')
+    sys.stderr.flush()
+
+
+def send(obj):
+    _protocol_out.write(json.dumps(obj) + '\n')
+    _protocol_out.flush()
+
 
 def init():
     global app
-    # buffalo_sc = lighter (~100 MB); swap to 'buffalo_l' for higher accuracy (~500 MB)
     app = FaceAnalysis(name='buffalo_sc', providers=['CPUExecutionProvider'])
-    app.prepare(ctx_id=0, det_size=(320, 320))
+    app.prepare(ctx_id=0, det_size=(640, 640), det_thresh=0.30)
 
-def send(obj):
-    print(json.dumps(obj), flush=True)
 
-def decode_image(b64_str):
-    """Decode base64 JPEG → BGR numpy array (InsightFace expects BGR)."""
-    img_bytes = base64.b64decode(b64_str)
-    img = Image.open(io.BytesIO(img_bytes)).convert('RGB')
-    arr = np.array(img)
-    return cv2.cvtColor(arr, cv2.COLOR_RGB2BGR)
+def load_image(path):
+    if not path or not os.path.exists(path):
+        raise FileNotFoundError(f'image not found: {path}')
+    data = np.fromfile(path, dtype=np.uint8)
+    img = cv2.imdecode(data, cv2.IMREAD_COLOR)
+    if img is None:
+        raise ValueError('cv2.imdecode failed')
+    return img
+
+
+def prepare_frame(img_bgr):
+    """ESP32-CAM front sensor is mirrored — always un-mirror for consistency."""
+    img_bgr = cv2.flip(img_bgr, 1)
+    h, w = img_bgr.shape[:2]
+    longest = max(h, w)
+    if longest < 640:
+        scale = 640 / float(longest)
+        img_bgr = cv2.resize(
+            img_bgr,
+            (int(w * scale), int(h * scale)),
+            interpolation=cv2.INTER_LINEAR,
+        )
+    return img_bgr
+
 
 def get_embedding(img_bgr):
-    """Return L2-normalised 512-dim embedding, or None if no face detected."""
-    faces = app.get(img_bgr)
+    prepared = prepare_frame(img_bgr)
+    faces = app.get(prepared)
     if not faces:
-        return None
-    # pick the largest face in frame
+        return None, 0.0, 0
+
     face = max(faces, key=lambda f: (f.bbox[2] - f.bbox[0]) * (f.bbox[3] - f.bbox[1]))
-    return face.normed_embedding   # already normalised → dot product = cosine similarity
+    score = float(getattr(face, 'det_score', 1.0))
+    if score < MIN_DET_SCORE:
+        return None, score, len(faces)
+    return face.normed_embedding, score, len(faces)
+
+
+def save_average_embedding():
+    global enroll_samples
+    if len(enroll_samples) < ENROLL_SAMPLES_REQUIRED:
+        return False
+    avg = np.mean(np.stack(enroll_samples), axis=0)
+    avg = avg / np.linalg.norm(avg)
+    np.save(EMBEDDING_FILE, avg)
+    enroll_samples = []
+    return True
+
 
 def main():
-    sys.stderr.write('[face_recog] Initialising InsightFace...\n')
-    sys.stderr.flush()
+    global enroll_samples
+    log('[face_recog] Initialising InsightFace...')
     init()
-    sys.stderr.write('[face_recog] Ready\n')
-    sys.stderr.flush()
+    log('[face_recog] Ready')
 
     for raw_line in sys.stdin:
         raw_line = raw_line.strip()
@@ -73,20 +111,37 @@ def main():
         cmd = req.get('cmd')
 
         if cmd == 'reset':
+            enroll_samples = []
             if os.path.exists(EMBEDDING_FILE):
                 os.remove(EMBEDDING_FILE)
             send({'result': 'ok'})
 
         elif cmd == 'enroll':
             try:
-                img = decode_image(req['image'])
-                emb = get_embedding(img)
+                img = load_image(req.get('image_path'))
+                emb, score, face_count = get_embedding(img)
+                h, w = img.shape[:2]
+                log(f'[face_recog] enroll: {w}x{h} faces={face_count} score={score:.2f}')
+
                 if emb is None:
                     send({'result': 'no_face'})
+                    continue
+
+                enroll_samples.append(emb)
+                count = len(enroll_samples)
+                log(f'[face_recog] enroll sample {count}/{ENROLL_SAMPLES_REQUIRED}')
+
+                if count >= ENROLL_SAMPLES_REQUIRED:
+                    save_average_embedding()
+                    send({'result': 'enrolled', 'samples': count})
                 else:
-                    np.save(EMBEDDING_FILE, emb)
-                    send({'result': 'enrolled'})
+                    send({
+                        'result': 'progress',
+                        'count': count,
+                        'needed': ENROLL_SAMPLES_REQUIRED,
+                    })
             except Exception as e:
+                log(f'[face_recog] error: {e}')
                 send({'result': 'error', 'msg': str(e)})
 
         elif cmd == 'recognize':
@@ -95,18 +150,25 @@ def main():
                     send({'result': 'no_match'})
                     continue
                 stored = np.load(EMBEDDING_FILE)
-                img    = decode_image(req['image'])
-                emb    = get_embedding(img)
+                img = load_image(req.get('image_path'))
+                emb, score, face_count = get_embedding(img)
+                h, w = img.shape[:2]
+                log(f'[face_recog] recognize: {w}x{h} faces={face_count} score={score:.2f}')
+
                 if emb is None:
                     send({'result': 'no_face'})
                     continue
-                similarity = float(np.dot(stored, emb))   # cosine similarity (0–1)
-                send({'result': 'match' if similarity > THRESHOLD else 'no_match'})
+
+                similarity = float(np.dot(stored, emb))
+                log(f'[face_recog] similarity={similarity:.3f}')
+                send({'result': 'match' if similarity >= THRESHOLD else 'no_match', 'similarity': similarity})
             except Exception as e:
+                log(f'[face_recog] error: {e}')
                 send({'result': 'error', 'msg': str(e)})
 
         else:
             send({'result': 'error', 'msg': 'unknown cmd'})
+
 
 if __name__ == '__main__':
     main()
